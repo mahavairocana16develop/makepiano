@@ -59,9 +59,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma-separated stems to generate: none, other, piano, no_vocals (default: all)")
     ap.add_argument("--device", default=None, help="torch device: cpu / cuda")
     ap.add_argument("--no-keep-audio", action="store_true", help="delete the downloaded WAV (disables rescore)")
+    ap.add_argument("--force", action="store_true", help="ignore an existing job for the same video and redo separation/transcription")
     a = ap.parse_args(argv)
     _report(run(a.url, Path(a.out), _opts(a), device=a.device, keep_audio=not a.no_keep_audio,
-                stem="all" if a.stem == "all" else [x.strip() for x in a.stem.split(",")]))
+                stem="all" if a.stem == "all" else [x.strip() for x in a.stem.split(",")], force=a.force))
     return 0
 
 

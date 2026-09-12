@@ -38,6 +38,7 @@ class JobRequest(BaseModel):
     legato: bool = True
     chords: bool = True
     level: str = "both"
+    force: bool = False
 
 
 def _work(job_id: str, req: JobRequest):
@@ -51,7 +52,7 @@ def _work(job_id: str, req: JobRequest):
         try:
             opts = ScoreOptions(grid=req.grid, split_pitch=req.split, fixed_bpm=req.bpm, beat_offset=req.beat_offset,
                                beats_per_bar=req.beats_per_bar, legato=req.legato, chords=req.chords, level=req.level)
-            r = run(req.url, OUT, opts, stem=req.stem, log=log)
+            r = run(req.url, OUT, opts, stem=req.stem, force=req.force, log=log)
             job.update(status="done", title=r.title, files=_files_for(r.workdir))
         except Exception as e:  # noqa: BLE001
             job.update(status="error", error=str(e))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -102,16 +103,33 @@ class Result:
 
 
 def _process_stem(sdir: Path, wav: Path, opts: ScoreOptions, device, log, loudness_db: float | None = None) -> dict:
-    """Transcribe one stem's audio and engrave all levels into sdir."""
+    """Transcribe one stem's audio (unless already transcribed) and engrave all levels into sdir."""
     sdir.mkdir(parents=True, exist_ok=True)
-    midi = transcribe_to_midi(wav, sdir / "transcription.mid", device=device, log=log)
+    midi = sdir / "transcription.mid"
+    if midi.exists():
+        log(f"[transcribe] reusing {sdir.name}/transcription.mid")
+    else:
+        transcribe_to_midi(wav, midi, device=device, log=log)
     levels = _engrave_levels(sdir, wav, midi, opts, log, loudness_db)
     return {"dir": sdir, "midi": midi, "levels": levels}
 
 
+def find_job(out_root: Path, source_id: str) -> Path | None:
+    """Existing job directory for this video/file, if any (matched through job.json)."""
+    for jf in out_root.glob("*/job.json"):
+        try:
+            if json.loads(jf.read_text()).get("source_id") == source_id:
+                return jf.parent
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str | None = None,
-        keep_audio: bool = True, stem: str | list[str] = "all", log=print) -> Result:
-    """stem: "all", one stem name, or a list of stem names (none / other / piano / no_vocals)."""
+        keep_audio: bool = True, stem: str | list[str] = "all", force: bool = False, log=print) -> Result:
+    """stem: "all", one stem name, or a list of stem names (none / other / piano / no_vocals).
+    Downloads are cached by video id and an existing job for the same video is extended in place
+    (separation and transcription are reused, scores are always re-engraved) unless force=True."""
     opts = opts or ScoreOptions()
     stems = list(STEMS) if stem == "all" else ([stem] if isinstance(stem, str) else list(stem))
     stems = [s_ for s_ in STEMS if s_ in stems] or ["none"]
@@ -122,34 +140,56 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
         lines.append(msg)
         log(msg)
 
-    tmp = out_root / "_tmp"
-    mix, title = download_audio(url, tmp, log=_log)
+    cached, title, source_id = download_audio(url, out_root / "_cache", log=_log)
     if opts.title == "Untitled":
         opts.title = title
-    workdir = out_root / sanitize(title)
-    if workdir.exists():
+    workdir = find_job(out_root, source_id)
+    if workdir is not None and force:
+        _log(f"[job] --force: discarding existing job {workdir.name}")
         shutil.rmtree(workdir)
-    workdir.mkdir(parents=True)
-    shutil.move(str(mix), workdir / "source_mix.wav")
+        workdir = None
+    if workdir is None:
+        workdir = out_root / sanitize(title)
+        if workdir.exists():  # a folder from an older layout with the same title
+            shutil.rmtree(workdir)
+        workdir.mkdir(parents=True)
+    else:
+        _log(f"[job] reusing existing job {workdir.name}")
     mix = workdir / "source_mix.wav"
-    _web_audio(mix, workdir / "audio_original.m4a", log=_log)
+    if not mix.exists():
+        try:
+            os.link(cached, mix)  # same file, no extra space
+        except OSError:
+            shutil.copy(cached, mix)
+    if not (workdir / "audio_original.m4a").exists():
+        _web_audio(mix, workdir / "audio_original.m4a", log=_log)
     loudness = _loudness_db(mix)  # synth playback is levelled against the original recording
 
-    stem_wavs = separate_all(mix, workdir / "stems", stems, device=device, log=_log) if stems != ["none"] else {"none": mix}
+    have = {st for st in stems if (workdir / "stems" / st / "transcription.mid").exists()}
+    need_sep = [st for st in stems if st != "none" and st not in have]
+    if have:
+        _log(f"[stem] already transcribed: {', '.join(sorted(have))}")
+    stem_wavs = separate_all(mix, workdir / "stems", need_sep, device=device, log=_log) if need_sep else {}
+    stem_wavs["none"] = mix
     results: dict[str, dict] = {}
     for st in stems:
-        wav = stem_wavs.get(st)
-        if wav is None:
+        sdir = workdir / "stems" / st
+        wav = sdir / "source.wav" if st in have else stem_wavs.get(st)
+        if wav is None or not wav.exists():
+            _log(f"[stem] {st}: no audio, skipped")
             continue
         _log(f"[stem] ===== {st} =====")
-        sdir = workdir / "stems" / st
         try:
             results[st] = _process_stem(sdir, wav, opts, device, _log, loudness)
         except Exception as e:  # noqa: BLE001 - one bad stem should not sink the job
             _log(f"[stem] {st} failed: {e}")
             continue
+        if st in have:
+            continue
         if st == "none":
-            (sdir / "source.wav").symlink_to(Path("..") / ".." / "source_mix.wav")  # rescore needs audio
+            link = sdir / "source.wav"
+            if not link.exists():
+                link.symlink_to(Path("..") / ".." / "source_mix.wav")  # rescore needs audio
         else:
             _web_audio(wav, sdir / "audio.m4a", log=_log)
             if keep_audio:
@@ -158,10 +198,13 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
                 wav.unlink(missing_ok=True)
     if not results:
         raise RuntimeError("Every stem failed; see log")
+    (workdir / "job.json").write_text(json.dumps({
+        "source_id": source_id, "url": url, "title": title, "stems": sorted(set(have) | set(results)),
+        "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
     if not keep_audio:
         mix.unlink(missing_ok=True)
         (workdir / "stems" / "none" / "source.wav").unlink(missing_ok=True)
-    shutil.rmtree(tmp, ignore_errors=True)
     dt = time.time() - t0
     _log(f"[done] {dt:.1f}s -> {workdir}")
     first = next(iter(results.values()))
