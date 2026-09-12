@@ -196,19 +196,38 @@ const pianoView = (() => {
     for (let p = LO; p <= HI; p++) { if (isBlack(p)) keyX[p] = x - keyW * 0.3; else { keyX[p] = x; x += keyW; } }
     return true;
   }
-  function draw(pb, t) {
+  function draw(pb, t, loop) {
     if (!ctx && !layout()) return;
     const split = pb.split || 60, rollH = H - KH;
+    // Visible notes: [t, t+LOOKAHEAD]. With a loop, clip at the loop end and continue seamlessly with the
+    // notes from the loop start, shifted by one loop length, so the repeat is visible before it happens.
+    const yOf = tt => rollH - (tt - t) / LOOKAHEAD * rollH;
+    const segs = [];  // [start, end, pitch, vel]
+    const addRange = (lo, hi, shift) => {
+      for (const [s, e, p, v] of pb.notes) {
+        if (e < lo || s > hi) continue;
+        segs.push([Math.max(s, lo) + shift, Math.min(e, hi) + shift, p, v, s <= t - shift && t - shift < e]);
+      }
+    };
+    if (loop && t < loop.end) {
+      addRange(t - 0.05, Math.min(t + LOOKAHEAD, loop.end), 0);
+      let shift = loop.end - loop.start, base = loop.start;
+      while (t + LOOKAHEAD > base + shift) {           // may need more than one wrap for tiny loops
+        addRange(loop.start, Math.min(loop.end, loop.start + (t + LOOKAHEAD - (base + shift) )), shift);
+        shift += loop.end - loop.start; base = loop.start;
+        if (shift > 1e4) break;
+      }
+    } else addRange(t - 0.05, t + LOOKAHEAD, 0);
     ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
     // beat/bar guide: light lines every second is meaningless; draw octave guides instead
     ctx.strokeStyle = '#1c2029'; ctx.lineWidth = 1;
     for (let p = LO; p <= HI; p++) if (p % 12 === 0) { ctx.beginPath(); ctx.moveTo(keyX[p], 0); ctx.lineTo(keyX[p], rollH); ctx.stroke(); }
     const active = new Set();
-    for (const [s, e, p, v] of pb.notes) {
-      if (e < t - 0.05 || s > t + LOOKAHEAD || p < LO || p > HI) continue;
-      const y0 = rollH - (e - t) / LOOKAHEAD * rollH, y1 = rollH - (s - t) / LOOKAHEAD * rollH;
+    for (const [s, e, p, v, on] of segs) {
+      if (p < LO || p > HI) continue;
+      const y0 = yOf(e), y1 = yOf(s);
       const w = isBlack(p) ? keyW * 0.6 : keyW * 0.9, x = keyX[p] + (isBlack(p) ? 0 : keyW * 0.05);
-      const rh = p >= split, on = s <= t && t < e;
+      const rh = p >= split;
       ctx.fillStyle = rh ? (on ? '#9db3ff' : '#6c8cff') : (on ? '#8be6c6' : '#4fc39a');
       ctx.globalAlpha = 0.35 + 0.65 * Math.min(1, v / 100);
       const top = Math.max(0, y0), bot = Math.min(rollH, y1);
@@ -226,7 +245,16 @@ const pianoView = (() => {
       ctx.fillStyle = active.has(p) ? (p >= split ? '#6c8cff' : '#4fc39a') : '#15171c';
       ctx.fillRect(keyX[p], rollH, keyW * 0.6, KH * 0.62);
     }
-    // "now" line
+    // loop boundary lines (where the repeat happens), then the "now" line
+    if (loop) {
+      ctx.strokeStyle = '#6c8cff'; ctx.lineWidth = 1; ctx.setLineDash([6, 4]);
+      for (let b = loop.end; b < t + LOOKAHEAD; b += loop.end - loop.start) {
+        if (b > t) { const y = yOf(b); ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+          ctx.fillStyle = '#9db3ff'; ctx.font = '11px sans-serif'; ctx.fillText('↻ リピート', 6, y - 4); }
+        if (loop.end - loop.start < 0.05) break;
+      }
+      ctx.setLineDash([]);
+    }
     ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, rollH); ctx.lineTo(W, rollH); ctx.stroke();
   }
   window.addEventListener('resize', () => { ctx = null; });
@@ -269,6 +297,27 @@ const player = (() => {
     seek.value = Math.round(Math.min(t, duration) / duration * 1000); timeEl.textContent = `${fmt(t)} / ${fmt(duration)}`;
     if (was) play();
   }
+  function activeLoop() {
+    if (!loopOn.checked || !src) return null;
+    const [a, b] = loopRange(); return { start: barTime(a), end: barTime(b + 1) };
+  }
+  // Synth looping: notes of the loop are scheduled one iteration ahead on the audio clock, so the repeat
+  // is gapless and ringing notes at the end simply decay instead of being cut.
+  let loopCtxBase = 0, loopIterLen = 0, loopSched = -1, loopS = 0, loopE = 0;
+  function scheduleIteration(k, tFrom) {
+    const r = rate(), now = ac.currentTime;
+    for (let [s, e, p, v] of pb.notes) {
+      if (e <= loopS || s >= loopE) continue;
+      if (asWritten) { s += (Math.random() - 0.5) * 0.02; v *= 1 + (Math.random() - 0.5) * 0.12; }
+      let sc = Math.max(s, loopS), ec = Math.min(e, loopE) + (asWritten ? 0.12 : 0.05);
+      if (tFrom != null && sc < tFrom) { if (ec <= tFrom) continue; sc = tFrom; }
+      const when = loopCtxBase + k * loopIterLen + (sc - loopS) / r;
+      if (when < now - 0.02) continue;
+      piano.play(p, Math.max(when, now), { duration: Math.max(0.05, (ec - sc) / r), gain: Math.pow(Math.min(1, v / 110), 1.3) });
+    }
+    loopSched = k;
+  }
+  const FADE = 0.3;  // s, audio cross-fade around the loop point
   // click a measure: first click sets the start, second the end (then start again)
   let clickState = 0;
   function bindMeasureClicks() {
@@ -276,10 +325,10 @@ const player = (() => {
       ev.stopPropagation();
       if (clickState === 0) { loopA.value = i + 1; loopB.value = i + 1; clickState = 1; }
       else { const a = +loopA.value; loopA.value = Math.min(a, i + 1); loopB.value = Math.max(a, i + 1); clickState = 0; }
-      loopOn.checked = true; paintLoop();
+      loopOn.checked = true; paintLoop(); if (playing && isSynth()) { stop(); play(); }
     });
   }
-  loopOn.onchange = loopA.onchange = loopB.onchange = paintLoop;
+  loopOn.onchange = loopA.onchange = loopB.onchange = () => { paintLoop(); if (playing && isSynth()) { stop(); play(); } if (pianoOn) pianoView.draw(pb, current(), activeLoop()); };
   // Slow automatic gain: steer the synth's measured RMS towards the original recording's RMS (pb.loudness_db).
   function autoLevel() {
     if (!analyser || !playing || !isSynth()) return;
@@ -338,7 +387,7 @@ const player = (() => {
     pianoView.reset();
     bindMeasureClicks(); clickState = 0; paintLoop();
   }
-  function setPianoView(on) { pianoOn = on; if (on) { pianoView.reset(); pianoView.draw(pb, current()); } }
+  function setPianoView(on) { pianoOn = on; if (on) { pianoView.reset(); pianoView.draw(pb, current(), activeLoop()); } }
   function setupAudio() {
     const src = mode.value === 'original' ? mode.dataset.original : mode.value === 'stem' ? mode.dataset.stem : null;
     if (audio) { audio.pause(); audio = null; }
@@ -374,6 +423,10 @@ const player = (() => {
   revEl.oninput = setReverb;
   function current() {
     if (!playing) return +seek.value / 1000 * duration;
+    if (isSynth() && loopSched >= 0) {
+      const el = ac.currentTime - loopCtxBase;
+      return loopS + (el - Math.floor(el / loopIterLen) * loopIterLen) * rate();
+    }
     return isSynth() ? synthStartT + (ac.currentTime - synthStartCtx) * rate() : audio.currentTime;
   }
   async function play() {
@@ -383,7 +436,14 @@ const player = (() => {
     if (isSynth()) {
       await ensureSynth();
       synthStartT = t0; synthStartCtx = ac.currentTime;
-      const r = rate();
+      const r = rate(), lp = activeLoop();
+      if (lp) {
+        loopS = lp.start; loopE = lp.end; loopIterLen = (loopE - loopS) / r;
+        loopCtxBase = ac.currentTime - (t0 - loopS) / r;
+        scheduleIteration(0, t0); scheduleIteration(1);
+        playing = true; pp.textContent = '⏸'; tick();
+        return;
+      }
       for (let [s, e, p, v] of pb.notes) {
         if (asWritten) {
           // Written notes are on a grid with hard cut-offs; a little human timing jitter, a touch of
@@ -402,6 +462,7 @@ const player = (() => {
     playing = true; pp.textContent = '⏸'; tick();
   }
   function stop(ended) {
+    loopSched = -1;
     if (piano) piano.stop();
     if (audio) audio.pause();
     playing = false; pp.textContent = '▶'; cancelAnimationFrame(raf);
@@ -422,23 +483,33 @@ const player = (() => {
     lastIdx = idx;
   }
   function tick() {
-    const t = current();
-    if (loopOn.checked && src) {
-      const [a, b] = loopRange(), end = barTime(b + 1);
-      if (t >= end - 0.02 || t < barTime(a) - 2) { seekTo(barTime(a)); return; }
-    }
+    let t = current();
+    const lp = activeLoop();
+    if (lp) {
+      if (isSynth()) {
+        if (loopSched < 0) { seekTo(lp.start); return; }        // loop switched on mid-play: restart in loop mode
+        const k = Math.floor((ac.currentTime - loopCtxBase) / loopIterLen);
+        if (k + 1 > loopSched) scheduleIteration(k + 1);
+      } else if (audio) {
+        if (t >= lp.end - 0.02 || t < lp.start - 2) {           // wrap: jump the position, volume already faded
+          audio.currentTime = lp.start; t = lp.start;
+        }
+        const toEnd = lp.end - t, fromStart = t - lp.start;
+        audio.volume = Math.max(0.1, Math.min(1, toEnd / FADE, fromStart / FADE + 0.1));
+      }
+    } else if (audio && audio.volume !== 1) audio.volume = 1;
     if (t >= duration) { stop(true); return; }
     seek.value = Math.round(t / duration * 1000); timeEl.textContent = `${fmt(t)} / ${fmt(duration)}`;
     let lo = 0, hi = pb.timemap.length - 1, idx = -1;
     while (lo <= hi) { const m = (lo + hi) >> 1; if (pb.timemap[m].t <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
     highlight(idx);
-    if (pianoOn) pianoView.draw(pb, t);
+    if (pianoOn) pianoView.draw(pb, t, lp);
     raf = requestAnimationFrame(tick);
   }
   pp.onclick = () => playing ? stop() : play();
-  seek.oninput = () => { const was = playing; if (was) stop(); timeEl.textContent = `${fmt(+seek.value/1000*duration)} / ${fmt(duration)}`; if (pianoOn) pianoView.draw(pb, current()); if (was) play(); };
+  seek.oninput = () => { const was = playing; if (was) stop(); timeEl.textContent = `${fmt(+seek.value/1000*duration)} / ${fmt(duration)}`; if (pianoOn) pianoView.draw(pb, current(), activeLoop()); if (was) play(); };
   mode.onchange = () => { const was = playing; stop(); setupAudio(); applyTimeline(); lastIdx = -1; if (was) play(); };
-  srcSel.onchange = tempoSel.onchange = () => { const was = playing; stop(); applyTimeline(); lastIdx = -1; if (pianoOn) pianoView.draw(pb, current()); if (was) play(); };
+  srcSel.onchange = tempoSel.onchange = () => { const was = playing; stop(); applyTimeline(); lastIdx = -1; if (pianoOn) pianoView.draw(pb, current(), activeLoop()); if (was) play(); };
   rateEl.onchange = () => { const was = playing; if (was) stop(); if (audio) audio.playbackRate = rate(); if (was) play(); };
   document.addEventListener('keydown', e => { if (e.code === 'Space' && pb && e.target.tagName !== 'INPUT') { e.preventDefault(); pp.onclick(); } });
   return { load, stop, setPianoView, debug: () => ({ masterGain: master ? master.gain.value : null, target: src && src.loudness_db }) };
