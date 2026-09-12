@@ -9,7 +9,7 @@ from pathlib import Path
 import librosa
 import mido
 import numpy as np
-from music21 import chord, clef, duration as m21duration, dynamics, expressions, harmony, key, layout, metadata, meter, note, pitch, stream
+from music21 import articulations, chord, clef, duration as m21duration, dynamics, expressions, harmony, key, layout, metadata, meter, note, pitch, stream
 
 
 @dataclass
@@ -40,6 +40,7 @@ class ScoreOptions:
     dynamics_marks: bool = True  # pp..ff from performed velocities
     short_notes: bool = True  # keep clearly short (staccato-like) notes short instead of holding to the next chord
     triplets: str = "16th"   # "off" | "8th" (allow 8th-note triplets per beat) | "16th" (also 16th-note triplets)
+    fingering: bool = True   # automatic fingering (numbers in the score, hands in the piano view)
     title: str = "Untitled"
 
 
@@ -464,7 +465,7 @@ def _beat_grids(starts: np.ndarray, base: int, triplets: str) -> dict[int, int]:
 
 def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opts: ScoreOptions, log=print,
                 pedal_events: list[tuple[float, bool]] | None = None
-                ) -> tuple[stream.Score, int, list[tuple[float, float, int, int]], list[tuple[float, float]]]:
+                ) -> tuple[stream.Score, int, list[tuple], list[tuple[float, float]]]:
     """Returns (score, bar_start_beat, score_notes). bar_start_beat is the beat index of the score's first
     bar within beat_times; score_notes are the notated events as (start_beat, end_beat, pitch, velocity)."""
     g = opts.grid
@@ -576,7 +577,14 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
     score.metadata.movementName = f"{title}   \u2669 \u2248 {round(bpm)}"
     score.metadata.composer = "makepiano"
 
-    score_notes: list[tuple[float, float, int, int]] = []
+    fingers: dict[str, dict[tuple[Fraction, int], int]] = {"rh": {}, "lh": {}}
+    if opts.fingering:
+        from .fingering import assign
+        for hand in ("rh", "lh"):
+            fingers[hand] = assign([(on, midis) for on, _, midis, _ in evs[hand] if midis], hand)
+        log(f"[score] fingering assigned to {sum(len(v) for v in fingers.values())} notes")
+
+    score_notes: list[tuple] = []
     parts = []
     for hand, cl in (("rh", clef.TrebleClef()), ("lh", clef.BassClef())):
         p = stream.Part(id=hand)
@@ -586,10 +594,16 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         p.insert(0, meter.TimeSignature(f"{opts.beats_per_bar}/4"))
         for on, dur, midis, vel in evs[hand]:
             score_notes.extend((float(on + bar_start), float(on + bar_start + dur), m,
-                                vel_of.get((hand, on, m), vel_of.get(("rh" if hand == "lh" else "lh", on, m), vel))) for m in midis)
+                                vel_of.get((hand, on, m), vel_of.get(("rh" if hand == "lh" else "lh", on, m), vel)),
+                                hand, fingers[hand].get((on, m), 0)) for m in midis)
             pitches = [pitch.Pitch(midi=m) for m in midis]  # note.Note(int) adds explicit naturals
             obj = note.Note(pitches[0]) if len(pitches) == 1 else chord.Chord(pitches)
             obj.quarterLength = float(dur)
+            if opts.fingering:
+                for m in (midis if len(midis) <= 3 else [midis[-1] if hand == "rh" else midis[0]]):  # keep chords legible
+                    f = fingers[hand].get((on, m))
+                    if f:
+                        obj.articulations.append(articulations.Fingering(f))
             p.insert(float(on), obj)
         parts.append(p)
 
@@ -645,7 +659,7 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         last = None
         for mi, m in enumerate(measures):
             b0, b1 = bar_start + mi * opts.beats_per_bar, bar_start + (mi + 1) * opts.beats_per_bar
-            vs = [v for s0, _, _, v in score_notes if b0 <= s0 < b1]
+            vs = [v for s0, _, _, v, *_ in score_notes if b0 <= s0 < b1]
             if not vs:
                 continue
             lvl = next(name for th, name in levels_ if np.mean(vs) < th)
@@ -693,8 +707,9 @@ def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: Score
         # notated events (quantised, legato) in audio seconds: what the piano view / synth play, like the sheet
         # notated pedal: [[start_s, end_s, start_beat, end_beat], ...]
         "pedal": [[sec(a + bar_start), sec(z + bar_start), a, z] for a, z in pedal_segments],
-        # [start_s, end_s, pitch, velocity, start_beat, end_beat] (beats relative to the score's first bar)
-        "notes": [[sec(b0), sec(b1), m, v, round(b0 - bar_start, 4), round(b1 - bar_start, 4)] for b0, b1, m, v in score_notes],
+        # [start_s, end_s, pitch, velocity, start_beat, end_beat, hand, finger] (beats relative to the first bar)
+        "notes": [[sec(b0), sec(b1), m, v, round(b0 - bar_start, 4), round(b1 - bar_start, 4), hand, f]
+                  for b0, b1, m, v, hand, f in score_notes],
         # model output as performed (same filtering as the score, ends extended while the sustain pedal is down):
         # what the synth plays in "performance" mode
         "raw_notes": [[round(e.start, 3), round(e.end, 3), e.pitch, e.velocity]

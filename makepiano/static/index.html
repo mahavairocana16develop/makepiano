@@ -38,7 +38,7 @@
   .viewbar button.on { background:var(--accent); }
   .viewbar { align-items:center; color:var(--muted); }
   #pianoView { display:none; margin-top:16px; }
-  #pianoView canvas { width:100%; height:520px; display:block; border-radius:8px; background:#0b0d12; }
+  #pianoView canvas { width:100%; height:640px; display:block; border-radius:8px; background:#0b0d12; }
   .spin { display:inline-block; width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--accent); border-radius:50%; animation:s 1s linear infinite; vertical-align:-2px; margin-right:8px; }
   @keyframes s { to { transform:rotate(360deg);} }
   /* player */
@@ -211,11 +211,54 @@ async function showResult(j) {
 const pianoView = (() => {
   const LO = 21, HI = 108, LOOKAHEAD = 4;        // seconds of notes shown above the keyboard
   const isBlack = p => [1, 3, 6, 8, 10].includes(p % 12);
-  let canvas, ctx, keyX = {}, keyW = 0, W = 0, H = 0, KH = 0;
+  let canvas, ctx, keyX = {}, keyW = 0, W = 0, H = 0, KH = 0, HB = 0;
+  const RH_COL = '#6c8cff', LH_COL = '#4fc39a';
+  // Where each finger is "resting": the key of the most recent note played with it (per hand).
+  function fingerState(pb, t) {
+    const st = { rh: {}, lh: {} }, seen = { rh: 0, lh: 0 }, notes = pb.hand_notes || pb.notes;
+    for (let i = notes.length - 1; i >= 0 && (seen.rh < 5 || seen.lh < 5); i--) {
+      const n = notes[i]; if (n.length < 8 || !n[7] || n[0] > t) continue;
+      const h = n[6]; if (st[h][n[7]]) continue;
+      st[h][n[7]] = { pitch: n[2], pressed: n[0] <= t && t < n[1], age: t - n[0] }; seen[h]++;
+    }
+    return st;
+  }
+  function keyCenter(p) { return keyX[p] + (isBlack(p) ? keyW * 0.3 : keyW * 0.5); }
+  function drawHands(pb, t, rollH) {
+    const st = fingerState(pb, t), top = rollH + KH, palmY = top + HB - 22;
+    for (const h of ['rh', 'lh']) {
+      const col = h === 'rh' ? RH_COL : LH_COL, known = st[h];
+      const xs = Object.values(known).map(k => keyCenter(k.pitch));
+      if (!xs.length) continue;
+      // fingers without a recent note sit at a natural spacing next to the known ones
+      const anchorF = +Object.keys(known)[0], anchorX = keyCenter(known[anchorF].pitch);
+      const dir = h === 'rh' ? 1 : -1;             // right hand: finger 5 is to the right of the thumb
+      const pos = {};
+      for (let f = 1; f <= 5; f++) pos[f] = known[f] ? keyCenter(known[f].pitch) : anchorX + dir * (f - anchorF) * keyW * 1.05;
+      const palmX = (pos[2] + pos[3] + pos[4]) / 3;
+      // palm
+      ctx.fillStyle = col + '33'; ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.ellipse(palmX, palmY, keyW * 3.2, 16, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(h === 'rh' ? '右手' : '左手', palmX, palmY + 4);
+      // fingers: line from the palm to the key, tip circle with the number; pressed = filled + lifted key
+      for (let f = 1; f <= 5; f++) {
+        const k = known[f], x = pos[f], pressed = k && k.pressed;
+        const tipY = pressed ? top - 6 : top + 18 + (f === 1 ? 14 : 0);
+        ctx.strokeStyle = col; ctx.lineWidth = pressed ? 3 : 1.5; ctx.globalAlpha = k ? 1 : 0.45;
+        ctx.beginPath(); ctx.moveTo(palmX + (f - 3) * keyW * 0.5 * dir, palmY - 10); ctx.lineTo(x, tipY + 8); ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, tipY, 9, 0, Math.PI * 2);
+        ctx.fillStyle = pressed ? col : '#0b0d12'; ctx.fill(); ctx.stroke();
+        ctx.fillStyle = pressed ? '#fff' : col; ctx.font = 'bold 11px sans-serif'; ctx.fillText(String(f), x, tipY + 4);
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.textAlign = 'left';
+  }
   function layout() {
     canvas = document.getElementById('pianoCanvas'); if (!canvas) return false;
     const dpr = window.devicePixelRatio || 1;
-    W = canvas.clientWidth; H = canvas.clientHeight; KH = 90;
+    W = canvas.clientWidth; H = canvas.clientHeight; KH = 90; HB = 120;
     canvas.width = W * dpr; canvas.height = H * dpr; ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     let whites = 0; for (let p = LO; p <= HI; p++) if (!isBlack(p)) whites++;
     keyW = W / whites; let x = 0;
@@ -224,15 +267,16 @@ const pianoView = (() => {
   }
   function draw(pb, t, loop) {
     if (!ctx && !layout()) return;
-    const split = pb.split || 60, rollH = H - KH;
+    const split = pb.split || 60, rollH = H - KH - HB;
     // Visible notes: [t, t+LOOKAHEAD]. With a loop, clip at the loop end and continue seamlessly with the
     // notes from the loop start, shifted by one loop length, so the repeat is visible before it happens.
     const yOf = tt => rollH - (tt - t) / LOOKAHEAD * rollH;
     const segs = [];  // [start, end, pitch, vel]
     const addRange = (lo, hi, shift) => {
-      for (const [s, e, p, v] of pb.notes) {
+      for (const n of pb.notes) {
+        const [s, e, p, v] = n;
         if (e < lo || s > hi) continue;
-        segs.push([Math.max(s, lo) + shift, Math.min(e, hi) + shift, p, v, s <= t - shift && t - shift < e]);
+        segs.push([Math.max(s, lo) + shift, Math.min(e, hi) + shift, p, v, s <= t - shift && t - shift < e, n[7] || 0]);
       }
     };
     if (loop && t < loop.end) {
@@ -249,7 +293,7 @@ const pianoView = (() => {
     ctx.strokeStyle = '#1c2029'; ctx.lineWidth = 1;
     for (let p = LO; p <= HI; p++) if (p % 12 === 0) { ctx.beginPath(); ctx.moveTo(keyX[p], 0); ctx.lineTo(keyX[p], rollH); ctx.stroke(); }
     const active = new Set();
-    for (const [s, e, p, v, on] of segs) {
+    for (const [s, e, p, v, on, fing] of segs) {
       if (p < LO || p > HI) continue;
       const y0 = yOf(e), y1 = yOf(s);
       const w = isBlack(p) ? keyW * 0.6 : keyW * 0.9, x = keyX[p] + (isBlack(p) ? 0 : keyW * 0.05);
@@ -257,7 +301,10 @@ const pianoView = (() => {
       ctx.fillStyle = rh ? (on ? '#9db3ff' : '#6c8cff') : (on ? '#8be6c6' : '#4fc39a');
       ctx.globalAlpha = 0.35 + 0.65 * Math.min(1, v / 100);
       const top = Math.max(0, y0), bot = Math.min(rollH, y1);
-      if (bot > top) { ctx.beginPath(); ctx.roundRect(x, top, w, Math.max(2, bot - top), 3); ctx.fill(); }
+      if (bot > top) {
+        ctx.beginPath(); ctx.roundRect(x, top, w, Math.max(2, bot - top), 3); ctx.fill();
+        if (fing && bot - top > 14 && w > 9) { ctx.fillStyle = '#0b0d12'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(String(fing), x + w / 2, bot - 4); ctx.textAlign = 'left'; }
+      }
       ctx.globalAlpha = 1;
       if (on) active.add(p);
     }
@@ -282,6 +329,9 @@ const pianoView = (() => {
       ctx.setLineDash([]);
     }
     ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, rollH); ctx.lineTo(W, rollH); ctx.stroke();
+    // hands band
+    ctx.fillStyle = '#10131a'; ctx.fillRect(0, rollH + KH, W, HB);
+    drawHands(pb, t, rollH);
   }
   window.addEventListener('resize', () => { ctx = null; });
   return { draw, reset: () => { ctx = null; } };
@@ -394,11 +444,14 @@ const player = (() => {
         return seg ? [s, Math.min(seg[1], e + 4), p, v] : [s, e, p, v];
       });
     };
+    const keepMeta = (mapped, orig) => mapped.map((n, i) => [...n, orig[i][6], orig[i][7]]);  // hand, finger
+    const fixedNotes = () => keepMeta(src.notes.map(n => [n[4] * spb, n[5] * spb, n[2], n[3]]), src.notes);
     pb = fixedTempo ? { ...src,
-        notes: withPedal(src.notes.map(n => [n[4] * spb, n[5] * spb, n[2], n[3]]), (src.pedal || []).map(p => [p[2] * spb, p[3] * spb])),
+        notes: withPedal(fixedNotes(), (src.pedal || []).map(p => [p[2] * spb, p[3] * spb])),
+        hand_notes: fixedNotes(),
         timemap: src.timemap.map(e => ({ t: e.q * spb, on: e.on, off: e.off })) }
-      : asWritten ? { ...src, notes: withPedal(src.notes, (src.pedal || []).map(p => [p[0], p[1]])) }
-      : { ...src, notes: src.raw_notes || src.notes };
+      : asWritten ? { ...src, notes: keepMeta(withPedal(src.notes, (src.pedal || []).map(p => [p[0], p[1]])), src.notes), hand_notes: src.notes }
+      : { ...src, notes: src.raw_notes || src.notes, hand_notes: src.notes };
     duration = Math.max(pb.timemap[pb.timemap.length-1].t + 1, ...pb.notes.map(n => n[1]));
     synthOpts.style.display = revWrap.style.display = isSynth() ? '' : 'none';
     timeEl.textContent = `${fmt(current())} / ${fmt(duration)}`;
