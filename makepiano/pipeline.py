@@ -44,7 +44,8 @@ def _engrave(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log) -> t
     tm_path.unlink()
     (workdir / "playback.json").write_text(json.dumps({
         "bpm": timing["bpm"], "notes": timing["notes"], "raw_notes": timing["raw_notes"], "split": timing["split"],
-        "timemap": [{"t": e["t"], "on": e.get("on", []), "off": e.get("off", [])} for e in timemap],
+        "bpm_score": round(timing["bpm"]),
+        "timemap": [{"t": e["t"], "q": e["qstamp"], "on": e.get("on", []), "off": e.get("off", [])} for e in timemap],
     }), encoding="utf-8")
     return xml, svgs, pdf
 

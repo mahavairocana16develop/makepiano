@@ -78,6 +78,7 @@
     <input type="range" id="seek" min="0" max="1000" value="0">
     <span class="time" id="time">0:00 / 0:00</span>
     <select id="rate"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option></select>
+    <label id="fixedWrap" class="status" style="display:none"><input type="checkbox" id="fixed"> 楽譜のテンポで再生 <span id="fixedBpm"></span></label>
     <span class="status" id="pstatus"></span>
   </div>
 </div>
@@ -195,21 +196,33 @@ const player = (() => {
   const el = document.getElementById('player'), pp = document.getElementById('pp'), mode = document.getElementById('mode'),
         seek = document.getElementById('seek'), timeEl = document.getElementById('time'), rateEl = document.getElementById('rate'),
         status = document.getElementById('pstatus');
-  let pb = null, audio = null, ac = null, piano = null, playing = false, duration = 0;
+  let src = null, pb = null, audio = null, ac = null, piano = null, playing = false, duration = 0;
+  const fixedEl = document.getElementById('fixed'), fixedWrap = document.getElementById('fixedWrap');
   let synthStartT = 0, synthStartCtx = 0, raf = 0, lastIdx = -1, lit = new Set(), pianoOn = false;
   const fmt = t => `${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}`;
   const rate = () => +rateEl.value;
   const isSynth = () => mode.value === 'synth';
 
-  function load(data, files) {
-    stop(); pb = data; lastIdx = -1;
+  // Timeline: audio seconds (beat-tracked, follows the recording) or, for the synth with "fixed tempo" on,
+  // the score's metronomic time (Klangio-style: every beat = 60/bpm s).
+  function applyTimeline() {
+    const fixed = isSynth() && fixedEl.checked, spb = 60 / (src.bpm_score || 120);
+    pb = fixed ? { ...src,
+        notes: src.notes.map(n => [n[4] * spb, n[5] * spb, n[2], n[3]]),
+        timemap: src.timemap.map(e => ({ t: e.q * spb, on: e.on, off: e.off })) } : src;
     duration = Math.max(pb.timemap[pb.timemap.length-1].t + 1, ...pb.notes.map(n => n[1]));
+    fixedWrap.style.display = isSynth() ? '' : 'none';
+    timeEl.textContent = `${fmt(current())} / ${fmt(duration)}`;
+  }
+  function load(data, files) {
+    stop(); src = data; lastIdx = -1;
+    document.getElementById('fixedBpm').textContent = `(♩=${data.bpm_score || '?'})`;
     mode.innerHTML = '';
     if (files.audio_original) mode.add(new Option('オリジナル サウンド', 'original'));
     if (files.audio_stem) mode.add(new Option('分離後の伴奏', 'stem'));
     mode.add(new Option('シンセサイザー サウンド（採譜結果）', 'synth'));
     mode.dataset.original = files.audio_original || ''; mode.dataset.stem = files.audio_stem || '';
-    setupAudio();
+    setupAudio(); applyTimeline();
     el.style.display = 'block'; seek.value = 0; timeEl.textContent = `0:00 / ${fmt(duration)}`;
     pianoView.reset();
   }
@@ -287,7 +300,8 @@ const player = (() => {
   }
   pp.onclick = () => playing ? stop() : play();
   seek.oninput = () => { const was = playing; if (was) stop(); timeEl.textContent = `${fmt(+seek.value/1000*duration)} / ${fmt(duration)}`; if (pianoOn) pianoView.draw(pb, current()); if (was) play(); };
-  mode.onchange = () => { const was = playing; stop(); setupAudio(); if (was) play(); };
+  mode.onchange = () => { const was = playing; stop(); setupAudio(); applyTimeline(); lastIdx = -1; if (was) play(); };
+  fixedEl.onchange = () => { const was = playing; stop(); applyTimeline(); lastIdx = -1; if (pianoOn) pianoView.draw(pb, current()); if (was) play(); };
   rateEl.onchange = () => { const was = playing; if (was) stop(); if (audio) audio.playbackRate = rate(); if (was) play(); };
   document.addEventListener('keydown', e => { if (e.code === 'Space' && pb && e.target.tagName !== 'INPUT') { e.preventDefault(); pp.onclick(); } });
   return { load, stop, setPianoView };

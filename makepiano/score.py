@@ -358,7 +358,8 @@ def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: Score
         "bar_start_beat": int(bar_start),
         "split": opts.split_pitch,
         # notated events (quantised, legato) in audio seconds: what the piano view / synth play, like the sheet
-        "notes": [[sec(b0), sec(b1), m, v] for b0, b1, m, v in score_notes],
+        # [start_s, end_s, pitch, velocity, start_beat, end_beat] (beats relative to the score's first bar)
+        "notes": [[sec(b0), sec(b1), m, v, round(b0 - bar_start, 4), round(b1 - bar_start, 4)] for b0, b1, m, v in score_notes],
         # raw model output, kept for reference
         "raw_notes": [[round(e.start, 3), round(e.end, 3), e.pitch, e.velocity] for e in events],
     }
