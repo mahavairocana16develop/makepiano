@@ -22,6 +22,7 @@ OUT.mkdir(exist_ok=True)
 
 app = FastAPI(title="makepiano")
 app.mount("/files", StaticFiles(directory=str(OUT)), name="files")
+app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
 JOBS: dict[str, dict] = {}
 _lock = threading.Lock()  # one transcription at a time (model is heavy)
