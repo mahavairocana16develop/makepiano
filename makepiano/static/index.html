@@ -78,7 +78,7 @@
     <input type="range" id="seek" min="0" max="1000" value="0">
     <span class="time" id="time">0:00 / 0:00</span>
     <select id="rate"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option></select>
-    <label id="fixedWrap" class="status" style="display:none"><input type="checkbox" id="fixed"> 楽譜のテンポで再生 <span id="fixedBpm"></span></label>
+    <label id="fixedWrap" class="status" style="display:none" title="オフ: 採譜した演奏をそのまま（タイミング・強弱・ペダル）。オン: 量子化した楽譜を固定テンポで機械的に"><input type="checkbox" id="fixed"> 楽譜どおりに再生 <span id="fixedBpm"></span></label>
     <span class="status" id="pstatus"></span>
   </div>
 </div>
@@ -191,7 +191,7 @@ const pianoView = (() => {
 })();
 
 // ---------------------------------------------------------------- player
-const SYNTH_ADSR = [0.005, 1.0, 0.3, 0.3];  // attack, decay, sustain level, release (seconds / ratio)
+const SCORE_ADSR = [0.005, 1.0, 0.3, 0.3];  // Klangio-like envelope for the metronomic "as written" mode
 const player = (() => {
   const el = document.getElementById('player'), pp = document.getElementById('pp'), mode = document.getElementById('mode'),
         seek = document.getElementById('seek'), timeEl = document.getElementById('time'), rateEl = document.getElementById('rate'),
@@ -203,13 +203,17 @@ const player = (() => {
   const rate = () => +rateEl.value;
   const isSynth = () => mode.value === 'synth';
 
-  // Timeline: audio seconds (beat-tracked, follows the recording) or, for the synth with "fixed tempo" on,
+  // Timeline: audio seconds (beat-tracked, follows the recording) or, for the synth with "as written" on,
   // the score's metronomic time (Klangio-style: every beat = 60/bpm s).
+  // Notes: the performance (model output with real timing, velocities and pedal) unless "as written".
+  let asWritten = false;
   function applyTimeline() {
-    const fixed = isSynth() && fixedEl.checked, spb = 60 / (src.bpm_score || 120);
-    pb = fixed ? { ...src,
+    asWritten = isSynth() && fixedEl.checked;
+    const spb = 60 / (src.bpm_score || 120);
+    pb = asWritten ? { ...src,
         notes: src.notes.map(n => [n[4] * spb, n[5] * spb, n[2], n[3]]),
-        timemap: src.timemap.map(e => ({ t: e.q * spb, on: e.on, off: e.off })) } : src;
+        timemap: src.timemap.map(e => ({ t: e.q * spb, on: e.on, off: e.off })) }
+      : { ...src, notes: src.raw_notes || src.notes };
     duration = Math.max(pb.timemap[pb.timemap.length-1].t + 1, ...pb.notes.map(n => n[1]));
     fixedWrap.style.display = isSynth() ? '' : 'none';
     timeEl.textContent = `${fmt(current())} / ${fmt(duration)}`;
@@ -257,9 +261,10 @@ const player = (() => {
       for (const [s, e, p, v] of pb.notes) {
         if (e <= t0) continue;
         const when = ac.currentTime + Math.max(0, (s - t0) / r);
-        piano.play(p, when, { duration: Math.max(0.05, (e - Math.max(s, t0)) / r),
-                              gain: 0.55 + 0.45 * Math.min(1, v / 100),   // Klangio plays a nearly flat velocity
-                              adsr: SYNTH_ADSR });
+        const opts = { duration: Math.max(0.05, (e - Math.max(s, t0)) / r) };
+        if (asWritten) { opts.gain = 0.55 + 0.45 * Math.min(1, v / 100); opts.adsr = SCORE_ADSR; }  // flat, Klangio-like
+        else { opts.gain = Math.pow(Math.min(1, v / 110), 1.3); }                                 // natural dynamics
+        piano.play(p, when, opts);
       }
     } else {
       if (!audio) setupAudio();

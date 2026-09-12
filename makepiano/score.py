@@ -57,6 +57,44 @@ def read_midi_notes(midi_path: Path) -> list[NoteEvent]:
     return events
 
 
+def read_pedal(midi_path: Path) -> list[tuple[float, bool]]:
+    """Sustain-pedal (CC64) changes as (time_s, is_down)."""
+    mid = mido.MidiFile(str(midi_path))
+    out: list[tuple[float, bool]] = []
+    t = 0.0
+    for msg in mid:
+        t += msg.time
+        if msg.type == "control_change" and msg.control == 64:
+            down = msg.value >= 64
+            if not out or out[-1][1] != down:
+                out.append((t, down))
+    return out
+
+
+def apply_pedal(events: list[NoteEvent], pedal: list[tuple[float, bool]], max_extend: float = 4.0) -> list[NoteEvent]:
+    """Extend each note to the next pedal release if the pedal is down when the key is released."""
+    if not pedal:
+        return events
+    times = np.array([t for t, _ in pedal])
+    out = []
+    for e in events:
+        i = int(np.searchsorted(times, e.end, side="right")) - 1
+        end = e.end
+        if i >= 0 and pedal[i][1]:  # pedal down at key release
+            j = i + 1
+            while j < len(pedal) and pedal[j][1]:
+                j += 1
+            release = pedal[j][0] if j < len(pedal) else e.end + max_extend
+            end = min(max(e.end, release), e.end + max_extend)
+        out.append(NoteEvent(e.pitch, e.start, end, e.velocity))
+    return out
+
+
+def filter_events(events: list[NoteEvent], opts: "ScoreOptions") -> list[NoteEvent]:
+    return [e for e in events if e.velocity >= opts.min_velocity and e.pitch <= opts.max_pitch
+            and (e.end - e.start) * 1000 >= opts.min_note_ms]
+
+
 # ---------------------------------------------------------------- beat tracking
 
 def track_beats(wav: Path, fixed_bpm: float | None, duration_hint: float, log=print) -> tuple[np.ndarray, float]:
@@ -229,8 +267,7 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
     """Returns (score, bar_start_beat, score_notes). bar_start_beat is the beat index of the score's first
     bar within beat_times; score_notes are the notated events as (start_beat, end_beat, pitch, velocity)."""
     g = opts.grid
-    events = [e for e in events if e.velocity >= opts.min_velocity and e.pitch <= opts.max_pitch
-              and (e.end - e.start) * 1000 >= opts.min_note_ms]
+    events = filter_events(events, opts)
     if not events:
         raise RuntimeError("No notes left after filtering; lower --min-velocity")
     starts = seconds_to_beats(np.array([e.start for e in events]), beat_times)
@@ -360,7 +397,9 @@ def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: Score
         # notated events (quantised, legato) in audio seconds: what the piano view / synth play, like the sheet
         # [start_s, end_s, pitch, velocity, start_beat, end_beat] (beats relative to the score's first bar)
         "notes": [[sec(b0), sec(b1), m, v, round(b0 - bar_start, 4), round(b1 - bar_start, 4)] for b0, b1, m, v in score_notes],
-        # raw model output, kept for reference
-        "raw_notes": [[round(e.start, 3), round(e.end, 3), e.pitch, e.velocity] for e in events],
+        # model output as performed (same filtering as the score, ends extended while the sustain pedal is down):
+        # what the synth plays in "performance" mode
+        "raw_notes": [[round(e.start, 3), round(e.end, 3), e.pitch, e.velocity]
+                      for e in apply_pedal(filter_events(events, opts), read_pedal(midi_path))],
     }
     return xml_out, timing
