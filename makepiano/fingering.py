@@ -9,10 +9,11 @@ import itertools
 from fractions import Fraction
 
 # Comfortable / maximum spans in semitones for finger pairs (lower finger number first), right hand.
-# (min_comfortable, max_comfortable, max_possible)
+# (min_comfortable, max_comfortable, max_possible). Sized for an average Japanese adult hand: an octave
+# (12 semitones) is the practical limit between thumb and little finger.
 SPANS = {
-    (1, 2): (1, 8, 10), (1, 3): (3, 10, 12), (1, 4): (5, 12, 14), (1, 5): (7, 13, 16),
-    (2, 3): (1, 3, 5), (2, 4): (3, 5, 7), (2, 5): (5, 8, 10),
+    (1, 2): (1, 6, 8), (1, 3): (3, 8, 10), (1, 4): (5, 10, 12), (1, 5): (7, 12, 13),
+    (2, 3): (1, 3, 4), (2, 4): (3, 5, 7), (2, 5): (5, 8, 10),
     (3, 4): (1, 3, 4), (3, 5): (3, 5, 7), (4, 5): (1, 3, 4),
 }
 BLACK = {1, 3, 6, 8, 10}

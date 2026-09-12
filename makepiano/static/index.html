@@ -38,7 +38,7 @@
   .viewbar button.on { background:var(--accent); }
   .viewbar { align-items:center; color:var(--muted); }
   #pianoView { display:none; margin-top:16px; }
-  #pianoView canvas { width:100%; height:640px; display:block; border-radius:8px; background:#0b0d12; }
+  #pianoView canvas { width:100%; height:660px; display:block; border-radius:8px; background:#0b0d12; }
   .spin { display:inline-block; width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--accent); border-radius:50%; animation:s 1s linear infinite; vertical-align:-2px; margin-right:8px; }
   @keyframes s { to { transform:rotate(360deg);} }
   /* player */
@@ -223,47 +223,103 @@ const pianoView = (() => {
     }
     return st;
   }
-  function keyCenter(p) { return keyX[p] + (isBlack(p) ? keyW * 0.3 : keyW * 0.5); }
-  function drawHands(pb, t, rollH) {
-    const st = fingerState(pb, t), top = rollH + KH, palmY = top + HB - 22;
-    for (const h of ['rh', 'lh']) {
-      const col = h === 'rh' ? RH_COL : LH_COL, known = st[h];
-      const xs = Object.values(known).map(k => keyCenter(k.pitch));
-      if (!xs.length) continue;
-      // fingers without a recent note sit at a natural spacing next to the known ones
-      const anchorF = +Object.keys(known)[0], anchorX = keyCenter(known[anchorF].pitch);
-      const dir = h === 'rh' ? 1 : -1;             // right hand: finger 5 is to the right of the thumb
-      const pos = {};
-      for (let f = 1; f <= 5; f++) pos[f] = known[f] ? keyCenter(known[f].pitch) : anchorX + dir * (f - anchorF) * keyW * 1.05;
-      const palmX = (pos[2] + pos[3] + pos[4]) / 3;
-      // palm
-      ctx.fillStyle = col + '33'; ctx.strokeStyle = col; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.ellipse(palmX, palmY, keyW * 3.2, 16, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(h === 'rh' ? '右手' : '左手', palmX, palmY + 4);
-      // fingers: line from the palm to the key, tip circle with the number; pressed = filled + lifted key
-      for (let f = 1; f <= 5; f++) {
-        const k = known[f], x = pos[f], pressed = k && k.pressed;
-        const tipY = pressed ? top - 6 : top + 18 + (f === 1 ? 14 : 0);
-        ctx.strokeStyle = col; ctx.lineWidth = pressed ? 3 : 1.5; ctx.globalAlpha = k ? 1 : 0.45;
-        ctx.beginPath(); ctx.moveTo(palmX + (f - 3) * keyW * 0.5 * dir, palmY - 10); ctx.lineTo(x, tipY + 8); ctx.stroke();
-        ctx.beginPath(); ctx.arc(x, tipY, 9, 0, Math.PI * 2);
-        ctx.fillStyle = pressed ? col : '#0b0d12'; ctx.fill(); ctx.stroke();
-        ctx.fillStyle = pressed ? '#fff' : col; ctx.font = 'bold 11px sans-serif'; ctx.fillText(String(f), x, tipY + 4);
-        ctx.globalAlpha = 1;
-      }
-    }
-    ctx.textAlign = 'left';
-  }
   function layout() {
     canvas = document.getElementById('pianoCanvas'); if (!canvas) return false;
     const dpr = window.devicePixelRatio || 1;
-    W = canvas.clientWidth; H = canvas.clientHeight; KH = 90; HB = 120;
+    W = canvas.clientWidth; H = canvas.clientHeight; KH = 96; HB = 130;
     canvas.width = W * dpr; canvas.height = H * dpr; ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     let whites = 0; for (let p = LO; p <= HI; p++) if (!isBlack(p)) whites++;
     keyW = W / whites; let x = 0;
     for (let p = LO; p <= HI; p++) { if (isBlack(p)) keyX[p] = x - keyW * 0.3; else { keyX[p] = x; x += keyW; } }
     return true;
+  }
+  function keyCenter(p) { return keyX[p] + (isBlack(p) ? keyW * 0.3 : keyW * 0.5); }
+  // ---- animated hands (top-down view). Per-hand finger state persists between frames so fingers glide.
+  const hands = { rh: null, lh: null };
+  const SKIN = '#f2cfae', SKIN_DARK = '#d9a77f', SKIN_LINE = '#b7845c', NAIL = '#fbe9dc';
+  function lerp(a, b, k) { return a + (b - a) * k; }
+  function drawHands(pb, t, rollH) {
+    const st = fingerState(pb, t), top = rollH, kb = rollH + KH, band = kb + HB;
+    for (const h of ['rh', 'lh']) {
+      const known = st[h], dir = h === 'rh' ? 1 : -1;
+      const knownF = Object.keys(known).map(Number);
+      if (!knownF.length && !hands[h]) continue;
+      // targets: known fingers on their keys, others spaced naturally beside the nearest known finger
+      const anchorF = knownF.length ? knownF[0] : 3;
+      const anchorX = knownF.length ? keyCenter(known[anchorF].pitch) : hands[h].fingers[3].x;
+      const target = {};
+      for (let f = 1; f <= 5; f++) {
+        const k = known[f];
+        const x = k ? keyCenter(k.pitch) : anchorX + dir * (f - anchorF) * keyW * 1.05;
+        // tip y: pressing -> on the key (black keys sit higher); resting -> hovering near the key front
+        const onBlack = k && isBlack(k.pitch);
+        const y = k && k.pressed ? (onBlack ? top + KH * 0.30 : top + KH * 0.62) : kb - 8;
+        const press = k && k.pressed ? 1 : 0;
+        target[f] = { x, y, press, recent: k ? Math.max(0, 1 - k.age / 1.5) : 0 };
+      }
+      if (!hands[h]) hands[h] = { fingers: Object.fromEntries([1,2,3,4,5].map(f => [f, { ...target[f] }])), palmX: target[3].x };
+      const H = hands[h];
+      for (let f = 1; f <= 5; f++) {
+        const cur = H.fingers[f], tg = target[f];
+        cur.x = lerp(cur.x, tg.x, 0.22); cur.y = lerp(cur.y, tg.y, 0.35); cur.press = lerp(cur.press, tg.press, 0.4); cur.recent = tg.recent;
+      }
+      H.palmX = lerp(H.palmX, (H.fingers[2].x + H.fingers[3].x + H.fingers[4].x) / 3, 0.15);
+      drawHand(H, dir, kb, band, h);
+    }
+  }
+  function drawHand(H, dir, kb, band, h) {
+    const F = H.fingers, palmY = kb + 34, palmW = keyW * 4.6, palmH = 52;
+    const tint = h === 'rh' ? 'rgba(108,140,255,0.28)' : 'rgba(79,195,154,0.28)';
+    // wrist + palm (rounded shape); fingers grow out of its top edge
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 4;
+    ctx.fillStyle = SKIN; ctx.strokeStyle = SKIN_LINE; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.roundRect(H.palmX - palmW * 0.32, palmY + palmH * 0.55, palmW * 0.64, HB, 14); ctx.fill();  // wrist/forearm
+    ctx.beginPath();
+    ctx.moveTo(H.palmX - palmW / 2, palmY + 6);
+    ctx.quadraticCurveTo(H.palmX - palmW / 2 - 6, palmY + palmH, H.palmX - palmW * 0.3, palmY + palmH);
+    ctx.lineTo(H.palmX + palmW * 0.3, palmY + palmH);
+    ctx.quadraticCurveTo(H.palmX + palmW / 2 + 6, palmY + palmH, H.palmX + palmW / 2, palmY + 6);
+    ctx.quadraticCurveTo(H.palmX, palmY - 10, H.palmX - palmW / 2, palmY + 6);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.shadowColor = 'transparent';
+    ctx.fillStyle = tint; ctx.fill();
+    // fingers, back to front (5..2 then thumb on top so it overlaps naturally)
+    const order = [5, 4, 3, 2, 1];
+    for (const f of order) {
+      const fg = F[f];
+      const baseX = H.palmX + (f === 1 ? -dir * palmW * 0.55 : (f - 3.5) * dir * palmW * 0.22), baseY = f === 1 ? palmY + 26 : palmY + 4;
+      const len = Math.hypot(fg.x - baseX, fg.y - baseY);
+      const w = f === 1 ? keyW * 0.95 : f === 5 ? keyW * 0.7 : keyW * 0.85;
+      // slight curl when resting: control point bows outward, tip comes back; pressing straightens it
+      const curl = (1 - fg.press) * 10;
+      const mx = (baseX + fg.x) / 2 + (f === 1 ? -dir * 8 : 0), my = (baseY + fg.y) / 2 - curl;
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.strokeStyle = SKIN_LINE; ctx.lineWidth = w + 2.4;
+      ctx.beginPath(); ctx.moveTo(baseX, baseY); ctx.quadraticCurveTo(mx, my, fg.x, fg.y); ctx.stroke();
+      ctx.strokeStyle = fg.press > 0.5 ? SKIN_DARK : SKIN; ctx.lineWidth = w;
+      ctx.beginPath(); ctx.moveTo(baseX, baseY); ctx.quadraticCurveTo(mx, my, fg.x, fg.y); ctx.stroke();
+      // joint creases
+      ctx.strokeStyle = 'rgba(160,110,80,0.35)'; ctx.lineWidth = 1;
+      for (const q of (f === 1 ? [0.5] : [0.38, 0.68])) {
+        const jx = (1 - q) * (1 - q) * baseX + 2 * (1 - q) * q * mx + q * q * fg.x, jy = (1 - q) * (1 - q) * baseY + 2 * (1 - q) * q * my + q * q * fg.y;
+        const ang = Math.atan2(fg.y - baseY, fg.x - baseX);
+        ctx.beginPath(); ctx.moveTo(jx - Math.sin(ang) * w * 0.38, jy + Math.cos(ang) * w * 0.38); ctx.lineTo(jx + Math.sin(ang) * w * 0.38, jy - Math.cos(ang) * w * 0.38); ctx.stroke();
+      }
+      // nail + number
+      ctx.fillStyle = fg.press > 0.5 ? '#f7d6c8' : NAIL; ctx.strokeStyle = SKIN_LINE; ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.ellipse(fg.x, fg.y - 1, w * 0.3, w * 0.38, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = fg.press > 0.5 ? '#c0392b' : '#5a3d2b'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(String(f), fg.x, fg.y + 4 + (fg.press > 0.5 ? 0 : 0));
+      if (fg.press > 0.5) {  // touch glow on the key
+        ctx.fillStyle = h === 'rh' ? 'rgba(108,140,255,0.35)' : 'rgba(79,195,154,0.35)';
+        ctx.beginPath(); ctx.ellipse(fg.x, fg.y, w * 0.9, w * 0.55, 0, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.fillStyle = h === 'rh' ? RH_COL : LH_COL; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(h === 'rh' ? '右手' : '左手', H.palmX, palmY + palmH + 22);
+    ctx.textAlign = 'left';
+    ctx.restore();
   }
   function draw(pb, t, loop) {
     if (!ctx && !layout()) return;
@@ -334,7 +390,7 @@ const pianoView = (() => {
     drawHands(pb, t, rollH);
   }
   window.addEventListener('resize', () => { ctx = null; });
-  return { draw, reset: () => { ctx = null; } };
+  return { draw, reset: () => { ctx = null; hands.rh = hands.lh = null; } };
 })();
 
 // ---------------------------------------------------------------- player
