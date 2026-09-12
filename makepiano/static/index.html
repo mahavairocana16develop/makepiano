@@ -26,6 +26,9 @@
   .page { background:#fff; border-radius:8px; }
   .page svg { width:100%; height:auto; display:block; }
   .page .playing * { fill: var(--hl) !important; stroke: var(--hl) !important; }
+  .page g.measure { cursor: pointer; }
+  .page g.measure.loopsel * { fill: #3b5bdb; stroke: #3b5bdb; }
+  #player input.bar { width:52px; padding:3px 4px; border-radius:6px; border:1px solid #2a2f3a; background:var(--card); color:var(--fg); }
   .err { color:var(--err); }
   .viewbar { display:flex; gap:8px; margin-top:14px; }
   .viewbar button { padding:8px 16px; font-size:14px; background:#262b36; }
@@ -84,6 +87,7 @@
       演奏データ <select id="srcSel" title="採譜した演奏: 実際の打鍵タイミング・強弱・ペダル。楽譜どおり: 表示中の楽譜（アレンジ含む）"><option value="perf">採譜した演奏</option><option value="score">楽譜どおり</option></select>
       テンポ <select id="tempoSel"><option value="follow">元音源に合わせる</option><option value="fixed">一定 <span id="fixedBpm"></span></option></select>
     </span>
+    <label class="status" id="loopWrap" title="楽譜の小節をクリックしても指定できます（1回目=開始、2回目=終了）"><input type="checkbox" id="loopOn"> リピート 小節 <input class="bar" id="loopA" type="number" min="1" value="1"> 〜 <input class="bar" id="loopB" type="number" min="1" value="4"></label>
     <label class="status" id="revWrap" style="display:none">残響 <input type="range" id="reverb" min="0" max="100" value="30" style="width:90px;vertical-align:middle"></label>
     <span class="status" id="pstatus"></span>
   </div>
@@ -239,6 +243,43 @@ const player = (() => {
   let level = 'original';
   const revEl = document.getElementById('reverb'), revWrap = document.getElementById('revWrap');
   let wet = null, master = null, analyser = null, agcBuf = null;
+  const loopOn = document.getElementById('loopOn'), loopA = document.getElementById('loopA'), loopB = document.getElementById('loopB');
+  // bar (1-based) -> timeline seconds, via the timemap's (q, t) pairs (q = quarter notes from the score start)
+  function barTime(bar) {
+    const q = (bar - 1) * (src.beats_per_bar || 4);
+    if (fixedTempo) return q * 60 / (src.bpm_score || 120);
+    const tm = pb.timemap;
+    if (q <= tm[0].q) return tm[0].t;
+    for (let i = 1; i < tm.length; i++) if (tm[i].q >= q) {
+      const a = tm[i - 1], b = tm[i]; return b.q === a.q ? b.t : a.t + (q - a.q) / (b.q - a.q) * (b.t - a.t);
+    }
+    const a = tm[tm.length - 1]; return a.t + (q - a.q) * 60 / (src.bpm_score || 120);
+  }
+  function barCount() { return document.querySelectorAll('.page g.measure').length || Math.ceil((src.timemap[src.timemap.length - 1].q + 1) / (src.beats_per_bar || 4)); }
+  function loopRange() {
+    const n = barCount(); let a = Math.max(1, Math.min(n, +loopA.value || 1)), b = Math.max(a, Math.min(n, +loopB.value || a));
+    return [a, b];
+  }
+  function paintLoop() {
+    const [a, b] = loopRange(), on = loopOn.checked;
+    document.querySelectorAll('.page g.measure').forEach((m, i) => m.classList.toggle('loopsel', on && i + 1 >= a && i + 1 <= b));
+  }
+  function seekTo(t) {
+    const was = playing; if (was) stop();
+    seek.value = Math.round(Math.min(t, duration) / duration * 1000); timeEl.textContent = `${fmt(t)} / ${fmt(duration)}`;
+    if (was) play();
+  }
+  // click a measure: first click sets the start, second the end (then start again)
+  let clickState = 0;
+  function bindMeasureClicks() {
+    document.querySelectorAll('.page g.measure').forEach((m, i) => m.onclick = ev => {
+      ev.stopPropagation();
+      if (clickState === 0) { loopA.value = i + 1; loopB.value = i + 1; clickState = 1; }
+      else { const a = +loopA.value; loopA.value = Math.min(a, i + 1); loopB.value = Math.max(a, i + 1); clickState = 0; }
+      loopOn.checked = true; paintLoop();
+    });
+  }
+  loopOn.onchange = loopA.onchange = loopB.onchange = paintLoop;
   // Slow automatic gain: steer the synth's measured RMS towards the original recording's RMS (pb.loudness_db).
   function autoLevel() {
     if (!analyser || !playing || !isSynth()) return;
@@ -295,6 +336,7 @@ const player = (() => {
     seek.value = duration ? Math.round(Math.min(pos, duration) / duration * 1000) : 0;
     timeEl.textContent = `${fmt(Math.min(pos, duration))} / ${fmt(duration)}`;
     pianoView.reset();
+    bindMeasureClicks(); clickState = 0; paintLoop();
   }
   function setPianoView(on) { pianoOn = on; if (on) { pianoView.reset(); pianoView.draw(pb, current()); } }
   function setupAudio() {
@@ -336,7 +378,8 @@ const player = (() => {
   }
   async function play() {
     if (!pb) return;
-    const t0 = +seek.value / 1000 * duration;
+    let t0 = +seek.value / 1000 * duration;
+    if (loopOn.checked) { const [a, b] = loopRange(); if (t0 < barTime(a) || t0 >= barTime(b + 1) - 0.02) { t0 = barTime(a); seek.value = Math.round(t0 / duration * 1000); } }
     if (isSynth()) {
       await ensureSynth();
       synthStartT = t0; synthStartCtx = ac.currentTime;
@@ -380,6 +423,10 @@ const player = (() => {
   }
   function tick() {
     const t = current();
+    if (loopOn.checked && src) {
+      const [a, b] = loopRange(), end = barTime(b + 1);
+      if (t >= end - 0.02 || t < barTime(a) - 2) { seekTo(barTime(a)); return; }
+    }
     if (t >= duration) { stop(true); return; }
     seek.value = Math.round(t / duration * 1000); timeEl.textContent = `${fmt(t)} / ${fmt(duration)}`;
     let lo = 0, hi = pb.timemap.length - 1, idx = -1;
