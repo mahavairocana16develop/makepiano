@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>makepiano</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --fg:#e8eaf0; --muted:#8a90a0; --accent:#6c8cff; --err:#ff6b6b; --hl:#ff5a5a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 980px; margin: 0 auto; padding: 40px 20px 120px; }
+  h1 { font-size: 28px; margin: 0 0 6px; }
+  p.sub { color: var(--muted); margin: 0 0 28px; }
+  form { display:flex; gap:10px; flex-wrap:wrap; }
+  input[type=url] { flex:1 1 420px; font-size:16px; padding:12px 14px; border-radius:10px; border:1px solid #2a2f3a; background:var(--card); color:var(--fg); }
+  button { font-size:16px; padding:12px 22px; border-radius:10px; border:0; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  details { margin-top:14px; color:var(--muted); }
+  details label { display:inline-block; margin:6px 16px 0 0; }
+  details input[type=number] { width:80px; padding:4px 6px; border-radius:6px; border:1px solid #2a2f3a; background:var(--card); color:var(--fg); }
+  select { padding:4px 6px; border-radius:6px; border:1px solid #2a2f3a; background:var(--card); color:var(--fg); }
+  .card { background:var(--card); border-radius:14px; padding:18px; margin-top:24px; }
+  pre.log { max-height:220px; overflow:auto; font-size:12px; color:var(--muted); margin:10px 0 0; white-space:pre-wrap; }
+  .links a { display:inline-block; margin:8px 12px 0 0; color:var(--accent); font-weight:600; text-decoration:none; }
+  .pages { margin-top:16px; display:flex; flex-direction:column; gap:16px; }
+  .page { background:#fff; border-radius:8px; }
+  .page svg { width:100%; height:auto; display:block; }
+  .page .playing * { fill: var(--hl) !important; stroke: var(--hl) !important; }
+  .err { color:var(--err); }
+  .viewbar { display:flex; gap:8px; margin-top:14px; }
+  .viewbar button { padding:8px 16px; font-size:14px; background:#262b36; }
+  .viewbar button.on { background:var(--accent); }
+  #pianoView { display:none; margin-top:16px; }
+  #pianoView canvas { width:100%; height:520px; display:block; border-radius:8px; background:#0b0d12; }
+  .spin { display:inline-block; width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--accent); border-radius:50%; animation:s 1s linear infinite; vertical-align:-2px; margin-right:8px; }
+  @keyframes s { to { transform:rotate(360deg);} }
+  /* player */
+  #player { position:fixed; left:0; right:0; bottom:0; background:#12151c; border-top:1px solid #2a2f3a; padding:10px 20px; display:none; z-index:10; }
+  #player .row { max-width:980px; margin:0 auto; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  #player button.play { width:44px; height:44px; border-radius:50%; padding:0; font-size:18px; }
+  #player input[type=range] { flex:1 1 200px; }
+  #player .time { font-variant-numeric: tabular-nums; color:var(--muted); min-width:90px; }
+  #player .status { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎹 makepiano</h1>
+  <p class="sub">YouTube の URL を貼るとピアノ譜（PDF / MIDI / MusicXML）を自動生成します。</p>
+  <form id="f">
+    <input type="url" id="url" placeholder="https://www.youtube.com/watch?v=..." required>
+    <button id="go" type="submit">楽譜を作る</button>
+  </form>
+  <div style="margin-top:14px;color:var(--muted)">
+    音源の種類：
+    <label><input type="radio" name="stem" value="none" checked> ピアノソロ（分離なし）</label>
+    <label><input type="radio" name="stem" value="other"> 歌・ドラム・ベースを除去（伴奏のみ）</label>
+    <label><input type="radio" name="stem" value="piano"> ピアノ成分だけ抽出</label>
+    <label><input type="radio" name="stem" value="no_vocals"> 歌だけ除去</label>
+  </div>
+  <details>
+    <summary>詳細設定</summary>
+    <label>BPM（空=自動）<input type="number" id="bpm" step="0.1" placeholder="auto"></label>
+    <label>最小音価 <select id="grid"><option value="2">8分</option><option value="4" selected>16分</option><option value="3">3連</option></select></label>
+    <label>左右分割音高 <input type="number" id="split" value="60"></label>
+    <label>拍子 <select id="bpb"><option value="4" selected>4/4</option><option value="3">3/4</option><option value="2">2/4</option><option value="6">6/4</option></select></label>
+    <label><input type="checkbox" id="legato" checked> 音を次の和音まで伸ばす</label>
+    <label><input type="checkbox" id="chords" checked> コードネーム</label>
+    <label>小節線ずらし(拍) <input type="number" id="off" value="0"></label>
+  </details>
+  <div id="out"></div>
+</main>
+
+<div id="player">
+  <div class="row">
+    <button class="play" id="pp" title="再生/停止 (Space)">▶</button>
+    <select id="mode"></select>
+    <input type="range" id="seek" min="0" max="1000" value="0">
+    <span class="time" id="time">0:00 / 0:00</span>
+    <select id="rate"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option></select>
+    <span class="status" id="pstatus"></span>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/soundfont-player@0.12.0/dist/soundfont-player.min.js"></script>
+<script>
+const f = document.getElementById('f'), out = document.getElementById('out'), go = document.getElementById('go');
+f.onsubmit = async (e) => {
+  e.preventDefault(); go.disabled = true; player.stop(); document.getElementById('player').style.display = 'none';
+  out.innerHTML = '<div class="card"><span class="spin"></span>処理中…（初回はモデルのダウンロードに数分かかります。音源分離ありは曲の長さの1〜2倍ほどかかります）<pre class="log" id="log"></pre></div>';
+  const body = {
+    url: document.getElementById('url').value,
+    bpm: document.getElementById('bpm').value ? +document.getElementById('bpm').value : null,
+    grid: +document.getElementById('grid').value,
+    split: +document.getElementById('split').value,
+    beat_offset: +document.getElementById('off').value,
+    beats_per_bar: +document.getElementById('bpb').value,
+    stem: document.querySelector('input[name=stem]:checked').value,
+    legato: document.getElementById('legato').checked,
+    chords: document.getElementById('chords').checked,
+  };
+  const r = await fetch('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const {id} = await r.json();
+  const timer = setInterval(async () => {
+    const j = await (await fetch('/api/jobs/' + id)).json();
+    const log = document.getElementById('log'); if (log) { log.textContent = j.log.join('\n'); log.scrollTop = log.scrollHeight; }
+    if (j.status === 'done') { clearInterval(timer); go.disabled = false; showResult(j); }
+    else if (j.status === 'error') {
+      clearInterval(timer); go.disabled = false;
+      out.innerHTML = `<div class="card err">エラー: ${j.error}<pre class="log">${j.log.join('\n')}</pre></div>`;
+    }
+  }, 1500);
+};
+
+async function showResult(j) {
+  const fl = j.files;
+  out.innerHTML = `<div class="card"><h2 style="margin:0 0 6px">${j.title}</h2>
+    <div class="links">${fl.pdf ? `<a href="${fl.pdf}" download>⬇ PDF</a>` : ''}<a href="${fl.midi}" download>⬇ MIDI</a><a href="${fl.musicxml}" download>⬇ MusicXML</a></div>
+    <div class="viewbar"><button id="vSheet" class="on">🎼 シートビュー</button><button id="vPiano">🎹 ピアノビュー</button></div>
+    <div class="pages" id="pages"></div>
+    <div id="pianoView"><canvas id="pianoCanvas"></canvas></div>
+    <pre class="log">${j.log.join('\n')}</pre></div>`;
+  const pages = document.getElementById('pages');
+  for (const s of fl.svgs) {                       // inline SVG so notes can be highlighted
+    const div = document.createElement('div'); div.className = 'page';
+    div.innerHTML = await (await fetch(s)).text();
+    pages.appendChild(div);
+  }
+  const pb = await (await fetch(fl.playback)).json();
+  player.load(pb, fl);
+  const vs = document.getElementById('vSheet'), vp = document.getElementById('vPiano');
+  const setView = piano => {
+    vs.classList.toggle('on', !piano); vp.classList.toggle('on', piano);
+    pages.style.display = piano ? 'none' : ''; document.getElementById('pianoView').style.display = piano ? 'block' : 'none';
+    player.setPianoView(piano);
+  };
+  vs.onclick = () => setView(false); vp.onclick = () => setView(true);
+}
+
+// ---------------------------------------------------------------- piano view (keyboard + falling notes)
+const pianoView = (() => {
+  const LO = 21, HI = 108, LOOKAHEAD = 4;        // seconds of notes shown above the keyboard
+  const isBlack = p => [1, 3, 6, 8, 10].includes(p % 12);
+  let canvas, ctx, keyX = {}, keyW = 0, W = 0, H = 0, KH = 0;
+  function layout() {
+    canvas = document.getElementById('pianoCanvas'); if (!canvas) return false;
+    const dpr = window.devicePixelRatio || 1;
+    W = canvas.clientWidth; H = canvas.clientHeight; KH = 90;
+    canvas.width = W * dpr; canvas.height = H * dpr; ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    let whites = 0; for (let p = LO; p <= HI; p++) if (!isBlack(p)) whites++;
+    keyW = W / whites; let x = 0;
+    for (let p = LO; p <= HI; p++) { if (isBlack(p)) keyX[p] = x - keyW * 0.3; else { keyX[p] = x; x += keyW; } }
+    return true;
+  }
+  function draw(pb, t) {
+    if (!ctx && !layout()) return;
+    const split = pb.split || 60, rollH = H - KH;
+    ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    // beat/bar guide: light lines every second is meaningless; draw octave guides instead
+    ctx.strokeStyle = '#1c2029'; ctx.lineWidth = 1;
+    for (let p = LO; p <= HI; p++) if (p % 12 === 0) { ctx.beginPath(); ctx.moveTo(keyX[p], 0); ctx.lineTo(keyX[p], rollH); ctx.stroke(); }
+    const active = new Set();
+    for (const [s, e, p, v] of pb.notes) {
+      if (e < t - 0.05 || s > t + LOOKAHEAD || p < LO || p > HI) continue;
+      const y0 = rollH - (e - t) / LOOKAHEAD * rollH, y1 = rollH - (s - t) / LOOKAHEAD * rollH;
+      const w = isBlack(p) ? keyW * 0.6 : keyW * 0.9, x = keyX[p] + (isBlack(p) ? 0 : keyW * 0.05);
+      const rh = p >= split, on = s <= t && t < e;
+      ctx.fillStyle = rh ? (on ? '#9db3ff' : '#6c8cff') : (on ? '#8be6c6' : '#4fc39a');
+      ctx.globalAlpha = 0.35 + 0.65 * Math.min(1, v / 100);
+      const top = Math.max(0, y0), bot = Math.min(rollH, y1);
+      if (bot > top) { ctx.beginPath(); ctx.roundRect(x, top, w, Math.max(2, bot - top), 3); ctx.fill(); }
+      ctx.globalAlpha = 1;
+      if (on) active.add(p);
+    }
+    // keyboard: whites then blacks
+    for (let p = LO; p <= HI; p++) if (!isBlack(p)) {
+      ctx.fillStyle = active.has(p) ? (p >= split ? '#6c8cff' : '#4fc39a') : '#f4f4f6';
+      ctx.fillRect(keyX[p] + 0.5, rollH, keyW - 1, KH);
+      if (p % 12 === 0) { ctx.fillStyle = '#9a9fae'; ctx.font = '10px sans-serif'; ctx.fillText('C' + (p / 12 - 1), keyX[p] + 3, H - 5); }
+    }
+    for (let p = LO; p <= HI; p++) if (isBlack(p)) {
+      ctx.fillStyle = active.has(p) ? (p >= split ? '#6c8cff' : '#4fc39a') : '#15171c';
+      ctx.fillRect(keyX[p], rollH, keyW * 0.6, KH * 0.62);
+    }
+    // "now" line
+    ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, rollH); ctx.lineTo(W, rollH); ctx.stroke();
+  }
+  window.addEventListener('resize', () => { ctx = null; });
+  return { draw, reset: () => { ctx = null; } };
+})();
+
+// ---------------------------------------------------------------- player
+const player = (() => {
+  const el = document.getElementById('player'), pp = document.getElementById('pp'), mode = document.getElementById('mode'),
+        seek = document.getElementById('seek'), timeEl = document.getElementById('time'), rateEl = document.getElementById('rate'),
+        status = document.getElementById('pstatus');
+  let pb = null, audio = null, ac = null, piano = null, playing = false, duration = 0;
+  let synthStartT = 0, synthStartCtx = 0, raf = 0, lastIdx = -1, lit = new Set(), pianoOn = false;
+  const fmt = t => `${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}`;
+  const rate = () => +rateEl.value;
+  const isSynth = () => mode.value === 'synth';
+
+  function load(data, files) {
+    stop(); pb = data; lastIdx = -1;
+    duration = Math.max(pb.timemap[pb.timemap.length-1].t + 1, ...pb.notes.map(n => n[1]));
+    mode.innerHTML = '';
+    if (files.audio_original) mode.add(new Option('オリジナル サウンド', 'original'));
+    if (files.audio_stem) mode.add(new Option('分離後の伴奏', 'stem'));
+    mode.add(new Option('シンセサイザー サウンド（採譜結果）', 'synth'));
+    mode.dataset.original = files.audio_original || ''; mode.dataset.stem = files.audio_stem || '';
+    setupAudio();
+    el.style.display = 'block'; seek.value = 0; timeEl.textContent = `0:00 / ${fmt(duration)}`;
+    pianoView.reset();
+  }
+  function setPianoView(on) { pianoOn = on; if (on) { pianoView.reset(); pianoView.draw(pb, current()); } }
+  function setupAudio() {
+    const src = mode.value === 'original' ? mode.dataset.original : mode.value === 'stem' ? mode.dataset.stem : null;
+    if (audio) { audio.pause(); audio = null; }
+    if (src) { audio = new Audio(src); audio.preload = 'auto'; audio.playbackRate = rate(); audio.onended = () => stop(true); }
+  }
+  async function ensureSynth() {
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === 'suspended') await ac.resume();
+    if (!piano) { status.textContent = 'ピアノ音源を読み込み中…'; piano = await Soundfont.instrument(ac, 'acoustic_grand_piano'); status.textContent = ''; }
+  }
+  function current() {
+    if (!playing) return +seek.value / 1000 * duration;
+    return isSynth() ? synthStartT + (ac.currentTime - synthStartCtx) * rate() : audio.currentTime;
+  }
+  async function play() {
+    if (!pb) return;
+    const t0 = +seek.value / 1000 * duration;
+    if (isSynth()) {
+      await ensureSynth();
+      synthStartT = t0; synthStartCtx = ac.currentTime;
+      const r = rate();
+      for (const [s, e, p, v] of pb.notes) {
+        if (e <= t0) continue;
+        const when = ac.currentTime + Math.max(0, (s - t0) / r);
+        piano.play(p, when, { duration: Math.max(0.05, (e - Math.max(s, t0)) / r), gain: Math.min(1, v / 100) });
+      }
+    } else {
+      if (!audio) setupAudio();
+      audio.currentTime = t0; audio.playbackRate = rate();
+      try { await audio.play(); } catch (err) { status.textContent = '音声を再生できません: ' + err.message; return; }
+    }
+    playing = true; pp.textContent = '⏸'; tick();
+  }
+  function stop(ended) {
+    if (piano) piano.stop();
+    if (audio) audio.pause();
+    playing = false; pp.textContent = '▶'; cancelAnimationFrame(raf);
+    if (ended) { seek.value = 0; highlight(-1); }
+  }
+  function highlight(idx) {
+    if (idx === lastIdx) return;
+    for (const id of lit) document.getElementById(id)?.classList.remove('playing');
+    lit.clear();
+    if (idx >= 0) {
+      // notes still sounding at idx: turn on everything on'ed up to idx that hasn't been off'ed
+      const on = new Set();
+      for (let i = Math.max(0, idx - 40); i <= idx; i++) { pb.timemap[i].on.forEach(x => on.add(x)); pb.timemap[i].off.forEach(x => on.delete(x)); }
+      let first = null;
+      for (const id of on) { const g = document.getElementById(id); if (g) { g.classList.add('playing'); lit.add(id); first ??= g; } }
+      if (first) { const r = first.getBoundingClientRect(); if (r.top < 60 || r.bottom > innerHeight - 140) first.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    }
+    lastIdx = idx;
+  }
+  function tick() {
+    const t = current();
+    if (t >= duration) { stop(true); return; }
+    seek.value = Math.round(t / duration * 1000); timeEl.textContent = `${fmt(t)} / ${fmt(duration)}`;
+    let lo = 0, hi = pb.timemap.length - 1, idx = -1;
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (pb.timemap[m].t <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
+    highlight(idx);
+    if (pianoOn) pianoView.draw(pb, t);
+    raf = requestAnimationFrame(tick);
+  }
+  pp.onclick = () => playing ? stop() : play();
+  seek.oninput = () => { const was = playing; if (was) stop(); timeEl.textContent = `${fmt(+seek.value/1000*duration)} / ${fmt(duration)}`; if (pianoOn) pianoView.draw(pb, current()); if (was) play(); };
+  mode.onchange = () => { const was = playing; stop(); setupAudio(); if (was) play(); };
+  rateEl.onchange = () => { const was = playing; if (was) stop(); if (audio) audio.playbackRate = rate(); if (was) play(); };
+  document.addEventListener('keydown', e => { if (e.code === 'Space' && pb && e.target.tagName !== 'INPUT') { e.preventDefault(); pp.onclick(); } });
+  return { load, stop, setPianoView };
+})();
+</script>
+</body>
+</html>
