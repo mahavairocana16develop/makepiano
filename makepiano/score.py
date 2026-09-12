@@ -33,6 +33,7 @@ class ScoreOptions:
     legato: bool = True      # hold each note/chord until the next onset in the same hand ("pop" style)
     max_hold_beats: float = 2.0  # ...but never stretch a note by more than this
     chords: bool = True      # add chord symbols above the treble staff
+    level: str = "original"  # "original" | "beginner" (melody + chord-root bass, 8th-note grid)
     title: str = "Untitled"
 
 
@@ -163,11 +164,10 @@ _NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 _NAMES_FLAT = ["C", "D-", "D", "E-", "E", "F", "G-", "G", "A-", "A", "B-", "B"]
 
 
-def _chord_symbols(parts: list[stream.Part], bars: int, beats_per_bar: int, prefer_flats: bool,
+def _chord_symbols(notes: list[tuple[float, float, list[int]]], bars: int, beats_per_bar: int, prefer_flats: bool,
                    window: float = 2.0) -> list[tuple[float, str]]:
     """Pick the best-matching chord for each half-bar window from pitch-class weights (duration-weighted,
-    bass note emphasised). Emit a symbol only when it changes."""
-    notes = [(n.offset, n.quarterLength, [pt.midi for pt in n.pitches]) for p in parts for n in p.flatten().notes]
+    bass note emphasised). notes: (offset_beats, duration_beats, midis). Emit a symbol only when it changes."""
     out: list[tuple[float, str]] = []
     last = None
     total = bars * beats_per_bar
@@ -208,6 +208,76 @@ def _chord_symbols(parts: list[stream.Part], bars: int, beats_per_bar: int, pref
                 last = fig
         w0 = w1
     return out
+
+
+_ROOT_PC = {n: i for i, n in enumerate(_NAMES_SHARP)} | {n: i for i, n in enumerate(_NAMES_FLAT)}
+
+
+def _root_pc(fig: str) -> int:
+    return _ROOT_PC[fig[:2]] if len(fig) > 1 and fig[1] in "#-" else _ROOT_PC[fig[0]]
+
+
+Event = tuple[Fraction, Fraction, list[int], int]  # onset_beats, duration_beats, midis, velocity
+
+
+def _estimate_key(notes: list[tuple[float, float, list[int]]], log=print) -> key.Key:
+    st = stream.Stream()
+    for off, dur, midis in notes:
+        for m in midis:
+            n = note.Note(pitch.Pitch(midi=m))
+            n.quarterLength = dur
+            st.insert(off, n)
+    try:
+        k = st.analyze("key")
+        log(f"[score] key: {k.name}")
+    except Exception:  # noqa: BLE001
+        k = key.Key("C")
+    if k.sharps >= 6:  # F# / C# major etc.: prefer the enharmonic flat key (Gb / Db)
+        k = key.Key(k.tonic.getEnharmonic(), k.mode)
+        log(f"[score] respelled key as {k.name}")
+    return k
+
+
+def _simplify_beginner(evs: dict[str, list[Event]], symbols: list[tuple[float, str]], bars: int,
+                       beats_per_bar: int, window: float = 2.0) -> dict[str, list[Event]]:
+    """Beginner arrangement: right hand = top-line melody only, left hand = chord root every half bar."""
+    # Right hand: keep the highest note of each chord; fold anything above C6 down an octave.
+    rh: list[Event] = []
+    for on, dur, midis, vel in evs["rh"]:
+        m = max(midis)
+        while m > 84:
+            m -= 12
+        rh.append((on, dur, [m], vel))
+    # Left hand: root of the current chord symbol in the bass register (E2..G3), held for the window.
+    lh: list[Event] = []
+    sym_at = sorted(symbols)
+    lowest_lh = {}
+    for on, dur, midis, vel in evs["lh"]:
+        w = float(on) // window
+        lowest_lh[w] = min(lowest_lh.get(w, 127), min(midis))
+    total = bars * beats_per_bar
+    w0 = 0.0
+    cur = None
+    while w0 < total:
+        while sym_at and sym_at[0][0] <= w0 + 1e-6:
+            cur = sym_at.pop(0)[1]
+        if cur is not None:
+            pc = _root_pc(cur)
+            m = 36 + ((pc - 0) % 12)  # C2..B2
+            if m < 40:
+                m += 12                # keep within E2..D#3
+        elif (w0 // window) in lowest_lh:
+            m = lowest_lh[w0 // window]
+            while m < 40:
+                m += 12
+            while m > 55:
+                m -= 12
+        else:
+            w0 += window
+            continue
+        lh.append((Fraction(w0).limit_denominator(8), Fraction(window).limit_denominator(8), [m], 80))
+        w0 += window
+    return {"rh": rh, "lh": lh}
 
 
 def _beat_chunks(start: Fraction, end: Fraction) -> list[Fraction]:
@@ -280,29 +350,17 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
     ends = ends - bar_start
 
     hands: dict[str, dict[Fraction, list[tuple[int, Fraction, int]]]] = {"rh": {}, "lh": {}}
-    for e, s, en in zip(events, starts, ends):
-        qs = _quantize(float(s), g)
+    for e, s_, en in zip(events, starts, ends):
+        qs = _quantize(float(s_), g)
         qe = max(_quantize(float(en), g), qs + Fraction(1, g))
         if qs < 0:
             continue
         hand = "rh" if e.pitch >= opts.split_pitch else "lh"
         hands[hand].setdefault(qs, []).append((e.pitch, qe - qs, e.velocity))
-    score_notes: list[tuple[float, float, int, int]] = []
 
-    score = stream.Score()
-    score.insert(0, metadata.Metadata())
-    score.metadata.title = _strip_emoji(opts.title)
-    # verovio only draws <movement-title>, so the tempo rides along on the title line.
-    score.metadata.movementName = f"{_strip_emoji(opts.title)}   \u2669 \u2248 {round(bpm)}"
-    score.metadata.composer = "makepiano"
-
-    parts = []
-    for hand, cl in (("rh", clef.TrebleClef()), ("lh", clef.BassClef())):
-        p = stream.Part(id=hand)
-        p.partName = ""
-        p.partAbbreviation = ""
-        p.insert(0, cl)
-        p.insert(0, meter.TimeSignature(f"{opts.beats_per_bar}/4"))
+    # Collapse each onset into one note/chord event with a single duration (monophonic-chord stream per hand).
+    evs: dict[str, list[Event]] = {"rh": [], "lh": []}
+    for hand in ("rh", "lh"):
         onsets = sorted(hands[hand])
         for i, on in enumerate(onsets):
             group = hands[hand][on]
@@ -315,10 +373,38 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
             else:
                 dur = min(d for _, d, _ in group)
             if gap is not None:
-                dur = min(dur, gap)  # avoid overlaps: monophonic-chord stream
+                dur = min(dur, gap)  # avoid overlaps
             dur = max(dur, Fraction(1, g))
-            midis = sorted({pc for pc, _, _ in group})
-            vel = int(np.mean([v for _, _, v in group]))
+            evs[hand].append((on, dur, sorted({pc for pc, _, _ in group}), int(np.mean([v for _, _, v in group]))))
+
+    end_beat = max((float(on + dur) for h in evs.values() for on, dur, _, _ in h), default=0.0)
+    bars = int(np.ceil(end_beat / opts.beats_per_bar)) or 1
+    all_notes = [(float(on), float(dur), midis) for h in evs.values() for on, dur, midis, _ in h]
+    # Chord detection needs a key preference for spelling; estimate the key from pitch classes first.
+    k = _estimate_key(all_notes, log)
+    symbols = _chord_symbols(all_notes, bars, opts.beats_per_bar, prefer_flats=k.sharps < 0) if (opts.chords or opts.level == "beginner") else []
+
+    if opts.level == "beginner":
+        evs = _simplify_beginner(evs, symbols, bars, opts.beats_per_bar)
+        log(f"[score] beginner arrangement: {len(evs['rh'])} melody notes, {len(evs['lh'])} bass notes")
+
+    score = stream.Score()
+    score.insert(0, metadata.Metadata())
+    title = _strip_emoji(opts.title) + (" (初級)" if opts.level == "beginner" else "")
+    score.metadata.title = title
+    # verovio only draws <movement-title>, so the tempo rides along on the title line.
+    score.metadata.movementName = f"{title}   \u2669 \u2248 {round(bpm)}"
+    score.metadata.composer = "makepiano"
+
+    score_notes: list[tuple[float, float, int, int]] = []
+    parts = []
+    for hand, cl in (("rh", clef.TrebleClef()), ("lh", clef.BassClef())):
+        p = stream.Part(id=hand)
+        p.partName = ""
+        p.partAbbreviation = ""
+        p.insert(0, cl)
+        p.insert(0, meter.TimeSignature(f"{opts.beats_per_bar}/4"))
+        for on, dur, midis, vel in evs[hand]:
             score_notes.extend((float(on + bar_start), float(on + bar_start + dur), m, vel) for m in midis)
             pitches = [pitch.Pitch(midi=m) for m in midis]  # note.Note(int) adds explicit naturals
             obj = note.Note(pitches[0]) if len(pitches) == 1 else chord.Chord(pitches)
@@ -326,30 +412,15 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
             p.insert(float(on), obj)
         parts.append(p)
 
-    # Key signature from the combined material, then respell accidentals to match (flats in flat keys).
-    combined = stream.Stream()
-    for p in parts:
-        for n in p.notes:
-            combined.insert(n.offset, n)
-    try:
-        k = combined.analyze("key")
-        log(f"[score] key: {k.name}")
-    except Exception:  # noqa: BLE001
-        k = key.Key("C")
-    if k.sharps >= 6:  # F# / C# major etc.: prefer the enharmonic flat key (Gb / Db)
-        k = key.Key(k.tonic.getEnharmonic(), k.mode)
-        log(f"[score] respelled key as {k.name}")
+    # Key signature, then respell accidentals to match (flats in flat keys).
     for p in parts:
         p.insert(0, key.KeySignature(k.sharps))
         for n in p.notes:
             for pt in n.pitches:
                 _respell(pt, k)
 
-    # Both parts must span the same number of bars.
-    end = max((p.highestTime for p in parts), default=0.0)
-    bars = int(np.ceil(end / opts.beats_per_bar)) or 1
-
-    symbols = _chord_symbols(parts, bars, opts.beats_per_bar, prefer_flats=k.sharps < 0) if opts.chords else []
+    if not opts.chords:
+        symbols = []
     for p in parts:
         p.makeMeasures(inPlace=True)
         while len(p.getElementsByClass(stream.Measure)) < bars:
@@ -382,6 +453,8 @@ def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: Score
     events = read_midi_notes(midi_path)
     if not events:
         raise RuntimeError("No notes were transcribed from the audio.")
+    if opts.level == "beginner" and opts.grid > 2:
+        opts.grid = 2  # 8th notes are enough for a beginner arrangement
     duration = max(e.end for e in events)
     beat_times, bpm = track_beats(wav_path, opts.fixed_bpm, duration, log=log)
     score, bar_start, score_notes = build_score(events, beat_times, bpm, opts, log=log)

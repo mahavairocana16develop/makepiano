@@ -54,6 +54,7 @@ uv run makepiano "https://www.youtube.com/watch?v=..."
 | `--min-velocity 25` | この音量未満の音を捨てる |
 | `--max-pitch 96` | この高さ（MIDI ノート番号）より上の音を捨てる。歌・シンバルの混入対策 |
 | `--min-note-ms 60` | これより短い音を捨てる（採譜ノイズ対策） |
+| `--level beginner` | 初級アレンジ：右手はメロディ（最高音）のみ、左手はコードのルート音を 2 拍ごと、最小音価 8 分 |
 | `--no-legato` | 音を次の和音まで伸ばさず、実測の長さで書く |
 | `--no-chords` | コードネームを付けない |
 

@@ -58,6 +58,11 @@
     <label><input type="radio" name="stem" value="piano"> ピアノ成分だけ抽出</label>
     <label><input type="radio" name="stem" value="no_vocals"> 歌だけ除去</label>
   </div>
+  <div style="margin-top:10px;color:var(--muted)">
+    難易度：
+    <label><input type="radio" name="level" value="original" checked> オリジナル（採譜どおり）</label>
+    <label><input type="radio" name="level" value="beginner"> 初級（右手メロディ＋左手ルート音）</label>
+  </div>
   <details>
     <summary>詳細設定</summary>
     <label>BPM（空=自動）<input type="number" id="bpm" step="0.1" placeholder="auto"></label>
@@ -101,6 +106,7 @@ f.onsubmit = async (e) => {
     stem: document.querySelector('input[name=stem]:checked').value,
     legato: document.getElementById('legato').checked,
     chords: document.getElementById('chords').checked,
+    level: document.querySelector('input[name=level]:checked').value,
   };
   const r = await fetch('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   const {id} = await r.json();

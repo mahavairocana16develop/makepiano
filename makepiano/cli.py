@@ -19,6 +19,8 @@ def _add_score_opts(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--max-pitch", type=int, default=96, help="drop notes above this MIDI pitch (default 96 = C7)")
     ap.add_argument("--min-note-ms", type=int, default=60, help="drop notes shorter than this (transcription noise)")
     ap.add_argument("--no-legato", action="store_true", help="write measured note lengths instead of holding to the next chord")
+    ap.add_argument("--level", default="original", choices=["original", "beginner"],
+                    help="beginner: melody-only right hand, chord-root bass, 8th-note grid")
     ap.add_argument("--no-chords", action="store_true", help="do not add chord symbols")
     ap.add_argument("--beat-offset", type=int, default=0, help="shift bar lines by N beats")
     ap.add_argument("--beats-per-bar", type=int, default=4, help="time signature numerator (x/4)")
@@ -28,7 +30,7 @@ def _add_score_opts(ap: argparse.ArgumentParser) -> None:
 def _opts(a) -> ScoreOptions:
     return ScoreOptions(grid=a.grid, split_pitch=a.split, min_velocity=a.min_velocity, max_pitch=a.max_pitch, min_note_ms=a.min_note_ms,
                         fixed_bpm=a.bpm, beat_offset=a.beat_offset, beats_per_bar=a.beats_per_bar,
-                        legato=not a.no_legato, chords=not a.no_chords, title=a.title)
+                        legato=not a.no_legato, chords=not a.no_chords, level=a.level, title=a.title)
 
 
 def _report(r) -> None:
