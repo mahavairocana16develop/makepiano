@@ -72,6 +72,7 @@
     <label><input type="checkbox" id="chords" checked> コードネーム</label>
     <label>小節線ずらし(拍) <input type="number" id="off" value="0"></label>
     <label>手の広がり <select id="span"><option value="12" selected>1オクターブ</option><option value="14">9度（手が大きい人）</option><option value="10">7度（小さめ）</option></select></label>
+    <label title="採譜結果を合成して元音源と比較し、最も近い検出設定を選びます（採譜時間が1〜2分伸びます）"><input type="checkbox" id="refine" checked> 合成比較で採譜を最適化</label>
     <label title="同じ動画のジョブがあれば分離・採譜を再利用します。オンで全部やり直します"><input type="checkbox" id="force"> 作り直す（再利用しない）</label>
   </details>
   <div id="past" style="margin-top:14px;color:var(--muted);display:none">過去の結果を開く： <select id="pastSel"><option value="">選択…</option></select></div>
@@ -113,6 +114,7 @@ f.onsubmit = async (e) => {
     chords: document.getElementById('chords').checked,
     force: document.getElementById('force').checked,
     max_span: +document.getElementById('span').value,
+    refine: document.getElementById('refine').checked,
   };
   const r = await fetch('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   const {id} = await r.json();

@@ -45,13 +45,24 @@ def pick_device(pref: str | None = None) -> str:
     return "cpu"  # MPS is not reliably supported by this model's ops
 
 
-def transcribe_to_midi(wav: Path, midi_out: Path, device: str | None = None, log=print) -> Path:
+def transcribe_to_midi(wav: Path, midi_out: Path, device: str | None = None, log=print, refine: bool = True) -> Path:
+    """Run the model once; with refine=True, pick the post-processing thresholds whose rendered result
+    sounds most like the recording (see refine.py) instead of the library defaults."""
+    from piano_transcription_inference.utilities import write_events_to_midi
+
     device = pick_device(device)
     log(f"[transcribe] loading audio {wav.name}")
     audio, _ = librosa.load(str(wav), sr=sample_rate, mono=True)
     log(f"[transcribe] running model on {device} ({len(audio) / sample_rate:.1f}s of audio)")
     ckpt = ensure_checkpoint(log=log)
     model = PianoTranscription(device=device, checkpoint_path=str(ckpt))
-    model.transcribe(audio, str(midi_out))
+    if not refine:
+        model.transcribe(audio, str(midi_out))
+    else:
+        out = model.transcribe(audio, None)
+        from .refine import refine as _refine
+        note_events, pedal_events, _ = _refine(out["output_dict"], audio, model.frames_per_second, model.classes_num,
+                                               log=log, report_path=midi_out.with_name("refine.json"))
+        write_events_to_midi(start_time=0, note_events=note_events, pedal_events=pedal_events, midi_path=str(midi_out))
     log(f"[transcribe] wrote {midi_out.name}")
     return midi_out

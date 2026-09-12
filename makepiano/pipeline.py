@@ -102,14 +102,15 @@ class Result:
         return json.loads(json.dumps(d, default=str))
 
 
-def _process_stem(sdir: Path, wav: Path, opts: ScoreOptions, device, log, loudness_db: float | None = None) -> dict:
+def _process_stem(sdir: Path, wav: Path, opts: ScoreOptions, device, log, loudness_db: float | None = None,
+                  refine: bool = True) -> dict:
     """Transcribe one stem's audio (unless already transcribed) and engrave all levels into sdir."""
     sdir.mkdir(parents=True, exist_ok=True)
     midi = sdir / "transcription.mid"
     if midi.exists():
         log(f"[transcribe] reusing {sdir.name}/transcription.mid")
     else:
-        transcribe_to_midi(wav, midi, device=device, log=log)
+        transcribe_to_midi(wav, midi, device=device, log=log, refine=refine)
     levels = _engrave_levels(sdir, wav, midi, opts, log, loudness_db)
     return {"dir": sdir, "midi": midi, "levels": levels}
 
@@ -126,7 +127,7 @@ def find_job(out_root: Path, source_id: str) -> Path | None:
 
 
 def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str | None = None,
-        keep_audio: bool = True, stem: str | list[str] = "all", force: bool = False, log=print) -> Result:
+        keep_audio: bool = True, stem: str | list[str] = "all", force: bool = False, refine: bool = True, log=print) -> Result:
     """stem: "all", one stem name, or a list of stem names (none / other / piano / no_vocals).
     Downloads are cached by video id and an existing job for the same video is extended in place
     (separation and transcription are reused, scores are always re-engraved) unless force=True."""
@@ -180,7 +181,7 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
             continue
         _log(f"[stem] ===== {st} =====")
         try:
-            results[st] = _process_stem(sdir, wav, opts, device, _log, loudness)
+            results[st] = _process_stem(sdir, wav, opts, device, _log, loudness, refine=refine)
         except Exception as e:  # noqa: BLE001 - one bad stem should not sink the job
             _log(f"[stem] {st} failed: {e}")
             continue
