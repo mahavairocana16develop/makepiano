@@ -50,16 +50,7 @@ def _work(job_id: str, req: JobRequest):
             opts = ScoreOptions(grid=req.grid, split_pitch=req.split, fixed_bpm=req.bpm, beat_offset=req.beat_offset,
                                beats_per_bar=req.beats_per_bar, legato=req.legato, chords=req.chords)
             r = run(req.url, OUT, opts, stem=req.stem, log=log)
-            rel = quote(str(r.workdir.relative_to(OUT)))
-            job.update(status="done", title=r.title, files={
-                "pdf": f"/files/{rel}/score.pdf" if r.pdf else None,
-                "midi": f"/files/{rel}/transcription.mid",
-                "musicxml": f"/files/{rel}/score.musicxml",
-                "svgs": [f"/files/{rel}/svg/{s.name}" for s in r.svgs],
-                "playback": f"/files/{rel}/playback.json",
-                "audio_original": f"/files/{rel}/audio_original.m4a" if (r.workdir / "audio_original.m4a").exists() else None,
-                "audio_stem": f"/files/{rel}/audio_stem.m4a" if (r.workdir / "audio_stem.m4a").exists() else None,
-            })
+            job.update(status="done", title=r.title, files=_files_for(r.workdir))
         except Exception as e:  # noqa: BLE001
             job.update(status="error", error=str(e))
 
@@ -67,6 +58,28 @@ def _work(job_id: str, req: JobRequest):
 @app.get("/", response_class=HTMLResponse)
 def index():
     return (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+
+def _files_for(workdir: Path) -> dict:
+    rel = quote(str(workdir.relative_to(OUT)))
+    svgs = sorted((workdir / "svg").glob("page-*.svg"))
+    return {
+        "pdf": f"/files/{rel}/score.pdf" if (workdir / "score.pdf").exists() else None,
+        "midi": f"/files/{rel}/transcription.mid",
+        "musicxml": f"/files/{rel}/score.musicxml",
+        "svgs": [f"/files/{rel}/svg/{s.name}" for s in svgs],
+        "playback": f"/files/{rel}/playback.json",
+        "audio_original": f"/files/{rel}/audio_original.m4a" if (workdir / "audio_original.m4a").exists() else None,
+        "audio_stem": f"/files/{rel}/audio_stem.m4a" if (workdir / "audio_stem.m4a").exists() else None,
+    }
+
+
+@app.get("/api/results")
+def list_results():
+    """Previously generated jobs (anything under output/ with playback.json), newest first."""
+    dirs = [d for d in OUT.iterdir() if d.is_dir() and (d / "playback.json").exists()]
+    dirs.sort(key=lambda d: (d / "playback.json").stat().st_mtime, reverse=True)
+    return [{"title": d.name, "files": _files_for(d)} for d in dirs]
 
 
 @app.get("/favicon.ico", include_in_schema=False)

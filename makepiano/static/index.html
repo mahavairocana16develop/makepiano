@@ -68,6 +68,7 @@
     <label><input type="checkbox" id="chords" checked> コードネーム</label>
     <label>小節線ずらし(拍) <input type="number" id="off" value="0"></label>
   </details>
+  <div id="past" style="margin-top:14px;color:var(--muted);display:none">過去の結果を開く： <select id="pastSel"><option value="">選択…</option></select></div>
   <div id="out"></div>
 </main>
 
@@ -79,6 +80,7 @@
     <span class="time" id="time">0:00 / 0:00</span>
     <select id="rate"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option></select>
     <label id="fixedWrap" class="status" style="display:none" title="オフ: 採譜した演奏をそのまま（タイミング・強弱・ペダル）。オン: 量子化した楽譜を固定テンポで機械的に"><input type="checkbox" id="fixed"> 楽譜どおりに再生 <span id="fixedBpm"></span></label>
+    <label class="status" id="revWrap" style="display:none">残響 <input type="range" id="reverb" min="0" max="100" value="30" style="width:90px;vertical-align:middle"></label>
     <span class="status" id="pstatus"></span>
   </div>
 </div>
@@ -112,6 +114,17 @@ f.onsubmit = async (e) => {
     }
   }, 1500);
 };
+
+async function loadPast() {
+  try {
+    const list = await (await fetch('/api/results')).json();
+    const sel = document.getElementById('pastSel');
+    for (const r of list) { const o = new Option(r.title, r.title); o.dataset.files = JSON.stringify(r.files); sel.add(o); }
+    document.getElementById('past').style.display = list.length ? '' : 'none';
+    sel.onchange = () => { const o = sel.selectedOptions[0]; if (o && o.dataset.files) showResult({ title: o.value, files: JSON.parse(o.dataset.files), log: [] }); };
+  } catch (e) { /* server without results endpoint */ }
+}
+loadPast();
 
 async function showResult(j) {
   const fl = j.files;
@@ -198,6 +211,8 @@ const player = (() => {
         status = document.getElementById('pstatus');
   let src = null, pb = null, audio = null, ac = null, piano = null, playing = false, duration = 0;
   const fixedEl = document.getElementById('fixed'), fixedWrap = document.getElementById('fixedWrap');
+  const revEl = document.getElementById('reverb'), revWrap = document.getElementById('revWrap');
+  let wet = null;
   let synthStartT = 0, synthStartCtx = 0, raf = 0, lastIdx = -1, lit = new Set(), pianoOn = false;
   const fmt = t => `${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}`;
   const rate = () => +rateEl.value;
@@ -215,7 +230,7 @@ const player = (() => {
         timemap: src.timemap.map(e => ({ t: e.q * spb, on: e.on, off: e.off })) }
       : { ...src, notes: src.raw_notes || src.notes };
     duration = Math.max(pb.timemap[pb.timemap.length-1].t + 1, ...pb.notes.map(n => n[1]));
-    fixedWrap.style.display = isSynth() ? '' : 'none';
+    fixedWrap.style.display = revWrap.style.display = isSynth() ? '' : 'none';
     timeEl.textContent = `${fmt(current())} / ${fmt(duration)}`;
   }
   function load(data, files) {
@@ -243,10 +258,22 @@ const player = (() => {
       status.textContent = 'ピアノ音源を読み込み中…';
       // MusyngKite grand piano, shaped to match Klangio's synth: its samples decay faster (C4: -20 dB at ~0.7 s
       // vs ~2 s) with similar brightness, so a decay/sustain envelope brings the two close.
-      piano = await Soundfont.instrument(ac, 'acoustic_grand_piano', { soundfont: 'MusyngKite', gain: 1.6 });
+      // Room: the soundfont is bone-dry, the separated accompaniment is not. Synthetic IR (decaying noise)
+      // through a convolver, mixed in parallel with the dry signal; amount from the 残響 slider.
+      const bus = ac.createGain(); bus.connect(ac.destination);
+      const conv = ac.createConvolver(); conv.buffer = makeIR(ac, 1.8, 2.5); wet = ac.createGain();
+      bus.connect(conv); conv.connect(wet); wet.connect(ac.destination); setReverb();
+      piano = await Soundfont.instrument(ac, 'acoustic_grand_piano', { soundfont: 'MusyngKite', gain: 1.4, destination: bus, release: 0.35 });
       status.textContent = '';
     }
   }
+  function makeIR(ctx, seconds, decay) {
+    const len = Math.floor(ctx.sampleRate * seconds), buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) { const d = buf.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay); }
+    return buf;
+  }
+  function setReverb() { if (wet) wet.gain.value = 0.6 * (+revEl.value / 100); }
+  revEl.oninput = setReverb;
   function current() {
     if (!playing) return +seek.value / 1000 * duration;
     return isSynth() ? synthStartT + (ac.currentTime - synthStartCtx) * rate() : audio.currentTime;
