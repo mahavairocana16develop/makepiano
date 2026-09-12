@@ -246,7 +246,10 @@ const pianoView = (() => {
     for (const h of ['rh', 'lh']) {
       const known = st[h], dir = h === 'rh' ? 1 : -1;   // +1: finger 5 is to the right of the thumb
       const knownF = Object.keys(known).map(Number);
-      if (!knownF.length && !hands[h]) continue;
+      if (!knownF.length) {                       // before the first note (or after a seek to the start):
+        if (hands[h]) drawHand(hands[h], dir, kb, kb + HB, h);   // keep the hand as it is, do not recompute
+        continue;
+      }
       // 1) fixed points: fingers that are pressing now (or were within the last 0.4 s) stay on their keys
       const fixed = {};
       for (const f of knownF) if (known[f].pressed || known[f].age < 0.4) fixed[f] = keyCenter(known[f].pitch);
@@ -275,6 +278,7 @@ const pianoView = (() => {
         const gap = x[f + 1] - x[f];
         if ((dir > 0 ? gap < minGap : gap > minGap) && fixed[f] == null) x[f] = x[f + 1] - minGap;
       }
+      if ([1,2,3,4,5].some(f => !Number.isFinite(x[f]))) { if (hands[h]) drawHand(hands[h], dir, kb, kb + HB, h); continue; }
       const target = {};
       for (let f = 1; f <= 5; f++) {
         const k = known[f], pressed = !!(k && k.pressed), onBlack = k && isBlack(k.pitch);
