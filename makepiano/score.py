@@ -26,6 +26,7 @@ class ScoreOptions:
     split_pitch: int = 60    # notes below this go to the left hand
     min_velocity: int = 25   # drop very quiet (probably spurious) notes
     max_pitch: int = 96      # drop notes above this (C7): usually vocal/cymbal bleed
+    min_note_ms: int = 60    # drop blips shorter than this (transcription noise)
     fixed_bpm: float | None = None  # skip beat tracking and use this tempo
     beat_offset: int = 0     # shift downbeat by N beats (fixes bar alignment)
     beats_per_bar: int = 4
@@ -223,10 +224,13 @@ def _quantize(x: float, grid: int) -> Fraction:
     return Fraction(round(x * grid), grid)
 
 
-def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opts: ScoreOptions, log=print) -> tuple[stream.Score, int]:
-    """Returns (score, bar_start_beat): beat index of the score's first bar within beat_times."""
+def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opts: ScoreOptions, log=print
+                ) -> tuple[stream.Score, int, list[tuple[float, float, int, int]]]:
+    """Returns (score, bar_start_beat, score_notes). bar_start_beat is the beat index of the score's first
+    bar within beat_times; score_notes are the notated events as (start_beat, end_beat, pitch, velocity)."""
     g = opts.grid
-    events = [e for e in events if e.velocity >= opts.min_velocity and e.pitch <= opts.max_pitch]
+    events = [e for e in events if e.velocity >= opts.min_velocity and e.pitch <= opts.max_pitch
+              and (e.end - e.start) * 1000 >= opts.min_note_ms]
     if not events:
         raise RuntimeError("No notes left after filtering; lower --min-velocity")
     starts = seconds_to_beats(np.array([e.start for e in events]), beat_times)
@@ -238,14 +242,15 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
     starts = starts - bar_start
     ends = ends - bar_start
 
-    hands: dict[str, dict[Fraction, list[tuple[int, Fraction]]]] = {"rh": {}, "lh": {}}
+    hands: dict[str, dict[Fraction, list[tuple[int, Fraction, int]]]] = {"rh": {}, "lh": {}}
     for e, s, en in zip(events, starts, ends):
         qs = _quantize(float(s), g)
         qe = max(_quantize(float(en), g), qs + Fraction(1, g))
         if qs < 0:
             continue
         hand = "rh" if e.pitch >= opts.split_pitch else "lh"
-        hands[hand].setdefault(qs, []).append((e.pitch, qe - qs))
+        hands[hand].setdefault(qs, []).append((e.pitch, qe - qs, e.velocity))
+    score_notes: list[tuple[float, float, int, int]] = []
 
     score = stream.Score()
     score.insert(0, metadata.Metadata())
@@ -267,15 +272,18 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
             gap = onsets[i + 1] - on if i + 1 < len(onsets) else None
             if opts.legato:
                 # Pop-piano notation: hold the chord until the next one, like a pedalled performance.
-                dur = max(d for _, d in group)
+                dur = max(d for _, d, _ in group)
                 if gap is not None and gap <= Fraction(opts.max_hold_beats).limit_denominator(16):
                     dur = gap
             else:
-                dur = min(d for _, d in group)
+                dur = min(d for _, d, _ in group)
             if gap is not None:
                 dur = min(dur, gap)  # avoid overlaps: monophonic-chord stream
             dur = max(dur, Fraction(1, g))
-            pitches = [pitch.Pitch(midi=m) for m in sorted({pc for pc, _ in group})]  # note.Note(int) adds explicit naturals
+            midis = sorted({pc for pc, _, _ in group})
+            vel = int(np.mean([v for _, _, v in group]))
+            score_notes.extend((float(on + bar_start), float(on + bar_start + dur), m, vel) for m in midis)
+            pitches = [pitch.Pitch(midi=m) for m in midis]  # note.Note(int) adds explicit naturals
             obj = note.Note(pitches[0]) if len(pitches) == 1 else chord.Chord(pitches)
             obj.quarterLength = float(dur)
             p.insert(float(on), obj)
@@ -329,7 +337,7 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         score.insert(0, p)
     score.insert(0, layout.StaffGroup(parts, symbol="brace", barTogether=True))
     log(f"[score] {bars} bars, {sum(len(p.flatten().notes) for p in parts)} note/chord events")
-    return score, bar_start
+    return score, bar_start, score_notes
 
 
 def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: ScoreOptions, log=print) -> tuple[Path, dict]:
@@ -339,15 +347,19 @@ def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: Score
         raise RuntimeError("No notes were transcribed from the audio.")
     duration = max(e.end for e in events)
     beat_times, bpm = track_beats(wav_path, opts.fixed_bpm, duration, log=log)
-    score, bar_start = build_score(events, beat_times, bpm, opts, log=log)
+    score, bar_start, score_notes = build_score(events, beat_times, bpm, opts, log=log)
     score.write("musicxml", fp=str(xml_out))
     log(f"[score] wrote {xml_out.name}")
+    idx = np.arange(len(beat_times))
+    sec = lambda b: round(float(np.interp(b, idx, beat_times)), 3)  # noqa: E731
     timing = {
         "bpm": bpm,
         "beat_times": [round(float(t), 4) for t in beat_times],
         "bar_start_beat": int(bar_start),
         "split": opts.split_pitch,
-        "notes": [[round(e.start, 3), round(e.end, 3), e.pitch, e.velocity] for e in events
-                  if e.velocity >= opts.min_velocity and e.pitch <= opts.max_pitch],
+        # notated events (quantised, legato) in audio seconds: what the piano view / synth play, like the sheet
+        "notes": [[sec(b0), sec(b1), m, v] for b0, b1, m, v in score_notes],
+        # raw model output, kept for reference
+        "raw_notes": [[round(e.start, 3), round(e.end, 3), e.pitch, e.velocity] for e in events],
     }
     return xml_out, timing
