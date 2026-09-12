@@ -34,6 +34,8 @@ class ScoreOptions:
     max_hold_beats: float = 2.0  # ...but never stretch a note by more than this
     chords: bool = True      # add chord symbols above the treble staff
     level: str = "both"      # "both" (=all) | "original" | "intermediate" | "beginner"
+    max_notes: int = 5       # per hand, at once
+    max_span: int = 12       # semitones a hand may stretch (12 = octave; 14 for large hands)
     title: str = "Untitled"
 
 
@@ -218,6 +220,39 @@ def _root_pc(fig: str) -> int:
 
 
 Event = tuple[Fraction, Fraction, list[int], int]  # onset_beats, duration_beats, midis, velocity
+
+
+def _fit_hands(evs: dict[str, list[Event]], max_notes: int, max_span: int) -> tuple[dict[str, list[Event]], int, int]:
+    """Make every chord physically playable: at most max_notes per hand within max_span semitones.
+    Right hand keeps the melody (top) and hands surplus low notes to the left hand at the same onset;
+    the left hand keeps the bass (bottom) and drops what still does not fit. Returns (evs, moved, dropped)."""
+    moved = dropped = 0
+    lh: dict[Fraction, list] = {on: [on, dur, list(midis), vel] for on, dur, midis, vel in evs["lh"]}
+    rh_out: list[Event] = []
+    for on, dur, midis, vel in evs["rh"]:
+        m = sorted(set(midis))
+        surplus = []
+        while m and (len(m) > max_notes or m[-1] - m[0] > max_span):
+            surplus.append(m.pop(0))
+        rh_out.append((on, dur, m, vel))
+        if surplus:
+            moved += len(surplus)
+            if on in lh:
+                lh[on][2] = sorted(set(lh[on][2]) | set(surplus))
+            else:
+                lh[on] = [on, dur, sorted(surplus), vel]
+    lh_out: list[Event] = []
+    onsets = sorted(lh)
+    for i, on in enumerate(onsets):
+        _, dur, midis, vel = lh[on]
+        m = sorted(set(midis))
+        while m and (len(m) > max_notes or m[-1] - m[0] > max_span):
+            m.pop()
+            dropped += 1
+        if i + 1 < len(onsets):
+            dur = min(dur, onsets[i + 1] - on)  # a moved chord may have created a new onset in between
+        lh_out.append((on, dur, m, vel))
+    return {"rh": rh_out, "lh": lh_out}, moved, dropped
 
 
 def _estimate_key(notes: list[tuple[float, float, list[int]]], log=print) -> key.Key:
@@ -445,6 +480,10 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
     elif opts.level == "intermediate":
         evs = _simplify_intermediate(evs, symbols, bars, opts.beats_per_bar)
         log(f"[score] intermediate arrangement: {len(evs['rh'])} right-hand events, {len(evs['lh'])} bass notes")
+
+    evs, moved, dropped = _fit_hands(evs, opts.max_notes, opts.max_span)
+    if moved or dropped:
+        log(f"[score] playability: {moved} notes moved to the left hand, {dropped} dropped (max {opts.max_notes} notes / {opts.max_span} semitones per hand)")
 
     score = stream.Score()
     score.insert(0, metadata.Metadata())

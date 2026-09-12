@@ -39,6 +39,8 @@ class JobRequest(BaseModel):
     chords: bool = True
     level: str = "both"
     force: bool = False
+    max_notes: int = 5
+    max_span: int = 12
 
 
 def _work(job_id: str, req: JobRequest):
@@ -51,7 +53,8 @@ def _work(job_id: str, req: JobRequest):
         job["status"] = "running"
         try:
             opts = ScoreOptions(grid=req.grid, split_pitch=req.split, fixed_bpm=req.bpm, beat_offset=req.beat_offset,
-                               beats_per_bar=req.beats_per_bar, legato=req.legato, chords=req.chords, level=req.level)
+                               beats_per_bar=req.beats_per_bar, legato=req.legato, chords=req.chords, level=req.level,
+                               max_notes=req.max_notes, max_span=req.max_span)
             r = run(req.url, OUT, opts, stem=req.stem, force=req.force, log=log)
             job.update(status="done", title=r.title, files=_files_for(r.workdir))
         except Exception as e:  # noqa: BLE001
