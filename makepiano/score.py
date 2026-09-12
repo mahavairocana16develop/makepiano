@@ -9,7 +9,7 @@ from pathlib import Path
 import librosa
 import mido
 import numpy as np
-from music21 import chord, clef, harmony, key, layout, metadata, meter, note, pitch, stream
+from music21 import chord, clef, duration as m21duration, dynamics, expressions, harmony, key, layout, metadata, meter, note, pitch, stream
 
 
 @dataclass
@@ -36,6 +36,10 @@ class ScoreOptions:
     level: str = "both"      # "both" (=all) | "original" | "intermediate" | "beginner"
     max_notes: int = 5       # per hand, at once
     max_span: int = 12       # semitones a hand may stretch (12 = octave; 14 for large hands)
+    pedal_marks: bool = True  # notate the sustain pedal from the transcription
+    dynamics_marks: bool = True  # pp..ff from performed velocities
+    short_notes: bool = True  # keep clearly short (staccato-like) notes short instead of holding to the next chord
+    triplets: str = "16th"   # "off" | "8th" (allow 8th-note triplets per beat) | "16th" (also 16th-note triplets)
     title: str = "Untitled"
 
 
@@ -222,7 +226,7 @@ def _root_pc(fig: str) -> int:
 Event = tuple[Fraction, Fraction, list[int], int]  # onset_beats, duration_beats, midis, velocity
 
 
-def _fit_hands(evs: dict[str, list[Event]], max_notes: int, max_span: int) -> tuple[dict[str, list[Event]], int, int]:
+def _fit_hands(evs: dict[str, list[Event]], max_notes: int, max_span: int, snap=None) -> tuple[dict[str, list[Event]], int, int]:
     """Make every chord physically playable: at most max_notes per hand within max_span semitones.
     Right hand keeps the melody (top) and hands surplus low notes to the left hand at the same onset;
     the left hand keeps the bass (bottom) and drops what still does not fit. Returns (evs, moved, dropped)."""
@@ -251,6 +255,8 @@ def _fit_hands(evs: dict[str, list[Event]], max_notes: int, max_span: int) -> tu
             dropped += 1
         if i + 1 < len(onsets):
             dur = min(dur, onsets[i + 1] - on)  # a moved chord may have created a new onset in between
+            if snap is not None:
+                dur = snap(on, dur)
         lh_out.append((on, dur, m, vel))
     return {"rh": rh_out, "lh": lh_out}, moved, dropped
 
@@ -422,8 +428,43 @@ def _quantize(x: float, grid: int) -> Fraction:
     return Fraction(round(x * grid), grid)
 
 
-def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opts: ScoreOptions, log=print
-                ) -> tuple[stream.Score, int, list[tuple[float, float, int, int]]]:
+def _notatable(d: Fraction) -> bool:
+    """One note head: plain / dotted values, or a plain triplet (3:2, 6:4) member."""
+    dur = m21duration.Duration(float(d))
+    if dur.type == "complex":
+        return False
+    return all(t.numberNotesActual in (3, 6) and t.numberNotesNormal in (2, 4) for t in dur.tuplets)
+
+
+def _beat_grids(starts: np.ndarray, base: int, triplets: str) -> dict[int, int]:
+    """Per beat, the subdivision (base, 3 or 6) that fits the performed onsets best. Swing / triplet feels
+    snap much better to thirds than to 16ths; a non-base grid must beat the base grid by a clear margin."""
+    grids: dict[int, int] = {}
+    if triplets == "off":
+        return grids
+    cands = (3, 6) if triplets == "16th" else (3,)
+    by_beat: dict[int, list[float]] = {}
+    for s_ in starts:
+        by_beat.setdefault(int(np.floor(s_)), []).append(float(s_))
+    for b, xs in by_beat.items():
+        if len(xs) < 2:
+            continue
+        def err(g):
+            return sum(abs(x * g - round(x * g)) / g for x in xs)
+        e_base = err(base)
+        best_g, best_e = base, e_base
+        for g in cands:
+            e = err(g)
+            if e < best_e * 0.6:
+                best_g, best_e = g, e
+        if best_g != base:
+            grids[b] = best_g
+    return grids
+
+
+def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opts: ScoreOptions, log=print,
+                pedal_events: list[tuple[float, bool]] | None = None
+                ) -> tuple[stream.Score, int, list[tuple[float, float, int, int]], list[tuple[float, float]]]:
     """Returns (score, bar_start_beat, score_notes). bar_start_beat is the beat index of the score's first
     bar within beat_times; score_notes are the notated events as (start_beat, end_beat, pitch, velocity)."""
     g = opts.grid
@@ -439,15 +480,53 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
     starts = starts - bar_start
     ends = ends - bar_start
 
+    grids = _beat_grids(starts, g, opts.triplets)
+    if grids:
+        log(f"[score] triplet feel detected in {len(grids)} beats")
+
+    def grid_at(x) -> int:
+        return grids.get(int(np.floor(float(x))), g)
+
+    def qz(x: float) -> Fraction:
+        return _quantize(x, grid_at(x))
+
+    def snap_dur(on: Fraction, dur: Fraction) -> Fraction:
+        """Keep durations notatable: a multiple of the start beat's grid, and if the note ends inside a beat
+        with a different grid, end on that beat's grid instead (never past the original end)."""
+        g0 = grid_at(on)
+        d = Fraction(int(dur * g0), g0)  # floor to the start grid
+        d = max(d, Fraction(1, g0))
+        end = on + d
+        g1 = grid_at(end - Fraction(1, 1000))
+        if g1 != g0 and end != int(end):
+            # A duration mixing quarters and thirds would need a 12-tuplet: stop at the beat boundary
+            # instead (the pedal mark carries the sustain).
+            boundary = Fraction(int(end))
+            if boundary > on:
+                d = boundary - on
+        # Still not a single notatable value (e.g. 7/6 = a beat plus a triplet 16th)? Stop at the beat line.
+        if not _notatable(d):
+            boundary = Fraction(int(on)) + 1
+            if boundary - on >= Fraction(1, g0) and boundary < on + d:
+                d = boundary - on
+            if not _notatable(d):
+                d = Fraction(1, g0)
+        return d
+
     hands: dict[str, dict[Fraction, list[tuple[int, Fraction, int]]]] = {"rh": {}, "lh": {}}
     for e, s_, en in zip(events, starts, ends):
-        qs = _quantize(float(s_), g)
-        qe = max(_quantize(float(en), g), qs + Fraction(1, g))
+        qs = qz(float(s_))
+        qe = max(qz(float(en)), qs + Fraction(1, grids.get(int(np.floor(float(s_))), g)))
         if qs < 0:
             continue
         hand = "rh" if e.pitch >= opts.split_pitch else "lh"
         hands[hand].setdefault(qs, []).append((e.pitch, qe - qs, e.velocity))
 
+    vel_of: dict[tuple[str, Fraction, int], int] = {h: 0 for h in ()}  # (hand, onset, pitch) -> performed velocity
+    for hand in ("rh", "lh"):
+        for on, group in hands[hand].items():
+            for pc, _, v in group:
+                vel_of[(hand, on, pc)] = max(v, vel_of.get((hand, on, pc), 0))
     # Collapse each onset into one note/chord event with a single duration (monophonic-chord stream per hand).
     evs: dict[str, list[Event]] = {"rh": [], "lh": []}
     for hand in ("rh", "lh"):
@@ -456,15 +535,19 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
             group = hands[hand][on]
             gap = onsets[i + 1] - on if i + 1 < len(onsets) else None
             if opts.legato:
-                # Pop-piano notation: hold the chord until the next one, like a pedalled performance.
-                dur = max(d for _, d, _ in group)
+                # Pop-piano notation: hold the chord until the next one, like a pedalled performance...
+                actual = max(d for _, d, _ in group)
+                dur = actual
                 if gap is not None and gap <= Fraction(opts.max_hold_beats).limit_denominator(16):
                     dur = gap
+                    # ...unless the performer clearly released early: keep short notes short (rest follows).
+                    if opts.short_notes and gap >= 1 and actual <= gap * Fraction(2, 5):
+                        dur = actual
             else:
                 dur = min(d for _, d, _ in group)
             if gap is not None:
                 dur = min(dur, gap)  # avoid overlaps
-            dur = max(dur, Fraction(1, g))
+            dur = snap_dur(on, dur)
             evs[hand].append((on, dur, sorted({pc for pc, _, _ in group}), int(np.mean([v for _, _, v in group]))))
 
     end_beat = max((float(on + dur) for h in evs.values() for on, dur, _, _ in h), default=0.0)
@@ -481,7 +564,7 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         evs = _simplify_intermediate(evs, symbols, bars, opts.beats_per_bar)
         log(f"[score] intermediate arrangement: {len(evs['rh'])} right-hand events, {len(evs['lh'])} bass notes")
 
-    evs, moved, dropped = _fit_hands(evs, opts.max_notes, opts.max_span)
+    evs, moved, dropped = _fit_hands(evs, opts.max_notes, opts.max_span, snap=snap_dur)
     if moved or dropped:
         log(f"[score] playability: {moved} notes moved to the left hand, {dropped} dropped (max {opts.max_notes} notes / {opts.max_span} semitones per hand)")
 
@@ -502,12 +585,39 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         p.insert(0, cl)
         p.insert(0, meter.TimeSignature(f"{opts.beats_per_bar}/4"))
         for on, dur, midis, vel in evs[hand]:
-            score_notes.extend((float(on + bar_start), float(on + bar_start + dur), m, vel) for m in midis)
+            score_notes.extend((float(on + bar_start), float(on + bar_start + dur), m,
+                                vel_of.get((hand, on, m), vel_of.get(("rh" if hand == "lh" else "lh", on, m), vel))) for m in midis)
             pitches = [pitch.Pitch(midi=m) for m in midis]  # note.Note(int) adds explicit naturals
             obj = note.Note(pitches[0]) if len(pitches) == 1 else chord.Chord(pitches)
             obj.quarterLength = float(dur)
             p.insert(float(on), obj)
         parts.append(p)
+
+    # Sustain pedal from the performance, quantised to the grid, as Ped./* marks on the bass staff.
+    pedal_segments: list[tuple[float, float]] = []
+    if opts.pedal_marks and pedal_events:
+        pb_ = seconds_to_beats(np.array([t for t, _ in pedal_events]), beat_times) - bar_start
+        down = None
+        for (t, is_down), b in zip(pedal_events, pb_):
+            if is_down and down is None:
+                down = b
+            elif not is_down and down is not None:
+                a, z = float(_quantize(float(down), g)), float(_quantize(float(b), g))
+                if z - a >= 0.5 and a >= 0:
+                    if pedal_segments and a - pedal_segments[-1][1] < 1.0 / g + 1e-6:
+                        pedal_segments[-1] = (pedal_segments[-1][0], z)  # merge a tiny gap
+                    else:
+                        pedal_segments.append((a, z))
+                down = None
+        n_marks = 0
+        for a, z in pedal_segments:
+            for part in (parts[1], parts[0]):
+                inside = [n for n in part.notes if a - 1e-6 <= n.offset < z - 1e-6]
+                if inside:
+                    part.insert(0, expressions.PedalMark(inside[0], inside[-1]))
+                    n_marks += 1
+                    break
+        log(f"[score] {n_marks} pedal marks")
 
     # Key signature, then respell accidentals to match (flats in flat keys).
     for p in parts:
@@ -529,6 +639,20 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         # Show accidentals relative to the key signature (and cancel with naturals), measure by measure.
         p.makeAccidentals(inPlace=True, overrideStatus=True, cautionaryNotImmediateRepeat=False)
 
+    if opts.dynamics_marks and score_notes:
+        measures = list(parts[0].getElementsByClass(stream.Measure))
+        levels_ = [(40, "pp"), (55, "p"), (68, "mp"), (80, "mf"), (95, "f"), (128, "ff")]
+        last = None
+        for mi, m in enumerate(measures):
+            b0, b1 = bar_start + mi * opts.beats_per_bar, bar_start + (mi + 1) * opts.beats_per_bar
+            vs = [v for s0, _, _, v in score_notes if b0 <= s0 < b1]
+            if not vs:
+                continue
+            lvl = next(name for th, name in levels_ if np.mean(vs) < th)
+            if lvl != last:
+                m.insert(0, dynamics.Dynamic(lvl))
+                last = lvl
+
     if symbols:
         measures = list(parts[0].getElementsByClass(stream.Measure))
         for off, fig in symbols:
@@ -542,7 +666,7 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         score.insert(0, p)
     score.insert(0, layout.StaffGroup(parts, symbol="brace", barTogether=True))
     log(f"[score] {bars} bars, {sum(len(p.flatten().notes) for p in parts)} note/chord events")
-    return score, bar_start, score_notes
+    return score, bar_start, score_notes, pedal_segments
 
 
 def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: ScoreOptions, log=print) -> tuple[Path, dict]:
@@ -554,7 +678,8 @@ def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: Score
         opts.grid = 2  # 8th notes are enough for simplified arrangements
     duration = max(e.end for e in events)
     beat_times, bpm = track_beats(wav_path, opts.fixed_bpm, duration, log=log)
-    score, bar_start, score_notes = build_score(events, beat_times, bpm, opts, log=log)
+    pedal_events = read_pedal(midi_path)
+    score, bar_start, score_notes, pedal_segments = build_score(events, beat_times, bpm, opts, log=log, pedal_events=pedal_events)
     score.write("musicxml", fp=str(xml_out))
     log(f"[score] wrote {xml_out.name}")
     idx = np.arange(len(beat_times))
@@ -566,11 +691,13 @@ def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: Score
         "split": opts.split_pitch,
         "beats_per_bar": opts.beats_per_bar,
         # notated events (quantised, legato) in audio seconds: what the piano view / synth play, like the sheet
+        # notated pedal: [[start_s, end_s, start_beat, end_beat], ...]
+        "pedal": [[sec(a + bar_start), sec(z + bar_start), a, z] for a, z in pedal_segments],
         # [start_s, end_s, pitch, velocity, start_beat, end_beat] (beats relative to the score's first bar)
         "notes": [[sec(b0), sec(b1), m, v, round(b0 - bar_start, 4), round(b1 - bar_start, 4)] for b0, b1, m, v in score_notes],
         # model output as performed (same filtering as the score, ends extended while the sustain pedal is down):
         # what the synth plays in "performance" mode
         "raw_notes": [[round(e.start, 3), round(e.end, 3), e.pitch, e.velocity]
-                      for e in apply_pedal(filter_events(events, opts), read_pedal(midi_path))],
+                      for e in apply_pedal(filter_events(events, opts), pedal_events)],
     }
     return xml_out, timing

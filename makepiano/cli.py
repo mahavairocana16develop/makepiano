@@ -20,6 +20,10 @@ def _add_score_opts(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--min-note-ms", type=int, default=60, help="drop notes shorter than this (transcription noise)")
     ap.add_argument("--max-notes", type=int, default=5, help="max simultaneous notes per hand (default 5)")
     ap.add_argument("--max-span", type=int, default=12, help="max hand stretch in semitones (default 12 = octave; try 14 for large hands)")
+    ap.add_argument("--triplets", default="16th", choices=["off", "8th", "16th"],
+                    help="per-beat triplet detection: off, 8th-note triplets, or also 16th-note triplets (default)")
+    ap.add_argument("--no-pedal-marks", action="store_true", help="do not notate the sustain pedal")
+    ap.add_argument("--no-dynamics", action="store_true", help="do not notate dynamics (pp..ff)")
     ap.add_argument("--no-legato", action="store_true", help="write measured note lengths instead of holding to the next chord")
     ap.add_argument("--level", default="both", choices=["both", "original", "intermediate", "beginner"],
                     help="which arrangements to engrave (default both = all); intermediate = melody + chord tones, root-fifth bass; beginner = melody + root bass")
@@ -32,7 +36,8 @@ def _add_score_opts(ap: argparse.ArgumentParser) -> None:
 def _opts(a) -> ScoreOptions:
     return ScoreOptions(grid=a.grid, split_pitch=a.split, min_velocity=a.min_velocity, max_pitch=a.max_pitch, min_note_ms=a.min_note_ms,
                         fixed_bpm=a.bpm, beat_offset=a.beat_offset, beats_per_bar=a.beats_per_bar,
-                        legato=not a.no_legato, chords=not a.no_chords, level=a.level, max_notes=a.max_notes, max_span=a.max_span, title=a.title)
+                        legato=not a.no_legato, chords=not a.no_chords, level=a.level, max_notes=a.max_notes, max_span=a.max_span, triplets=a.triplets,
+                        pedal_marks=not a.no_pedal_marks, dynamics_marks=not a.no_dynamics, title=a.title)
 
 
 def _report(r) -> None:

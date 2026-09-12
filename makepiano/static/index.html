@@ -68,7 +68,8 @@
   <details>
     <summary>詳細設定</summary>
     <label>BPM（空=自動）<input type="number" id="bpm" step="0.1" placeholder="auto"></label>
-    <label>最小音価 <select id="grid"><option value="2">8分</option><option value="4" selected>16分</option><option value="3">3連</option></select></label>
+    <label>最小音価 <select id="grid"><option value="2">8分</option><option value="4" selected>16分</option></select></label>
+    <label>三連符の自動検出 <select id="trip"><option value="16th" selected>8分・16分三連</option><option value="8th">8分三連のみ</option><option value="off">なし</option></select></label>
     <label>左右分割音高 <input type="number" id="split" value="60"></label>
     <label>拍子 <select id="bpb"><option value="4" selected>4/4</option><option value="3">3/4</option><option value="2">2/4</option><option value="6">6/4</option></select></label>
     <label><input type="checkbox" id="legato" checked> 音を次の和音まで伸ばす</label>
@@ -121,6 +122,7 @@ f.onsubmit = async (e) => {
     force: document.getElementById('force').checked,
     max_span: +document.getElementById('span').value,
     refine: document.getElementById('refine').checked,
+    triplets: document.getElementById('trip').value,
   };
   const r = await fetch('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   const {id} = await r.json();
@@ -378,10 +380,18 @@ const player = (() => {
     tempoSel.disabled = !asWritten;
     fixedTempo = asWritten && tempoSel.value === 'fixed';
     const spb = 60 / (src.bpm_score || 120);
+    // Notated pedal (Ped./*): while it is down, written notes keep ringing until the release.
+    const withPedal = (notes, segs) => {
+      if (!segs || !segs.length) return notes;
+      return notes.map(([s, e, p, v]) => {
+        const seg = segs.find(([a, z]) => a <= e && e < z);
+        return seg ? [s, Math.min(seg[1], e + 4), p, v] : [s, e, p, v];
+      });
+    };
     pb = fixedTempo ? { ...src,
-        notes: src.notes.map(n => [n[4] * spb, n[5] * spb, n[2], n[3]]),
+        notes: withPedal(src.notes.map(n => [n[4] * spb, n[5] * spb, n[2], n[3]]), (src.pedal || []).map(p => [p[2] * spb, p[3] * spb])),
         timemap: src.timemap.map(e => ({ t: e.q * spb, on: e.on, off: e.off })) }
-      : asWritten ? { ...src, notes: src.notes }
+      : asWritten ? { ...src, notes: withPedal(src.notes, (src.pedal || []).map(p => [p[0], p[1]])) }
       : { ...src, notes: src.raw_notes || src.notes };
     duration = Math.max(pb.timemap[pb.timemap.length-1].t + 1, ...pb.notes.map(n => n[1]));
     synthOpts.style.display = revWrap.style.display = isSynth() ? '' : 'none';

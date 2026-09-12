@@ -75,7 +75,7 @@ def _engrave(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log, loud
     (workdir / "playback.json").write_text(json.dumps({
         "bpm": timing["bpm"], "notes": timing["notes"], "raw_notes": timing["raw_notes"], "split": timing["split"],
         "loudness_db": loudness_db if loudness_db is not None else _loudness_db(wav),  # of the original mix
-        "beats_per_bar": timing["beats_per_bar"],
+        "beats_per_bar": timing["beats_per_bar"], "pedal": timing["pedal"],
         "bpm_score": round(timing["bpm"]),
         "timemap": [{"t": e["t"], "q": e["qstamp"], "on": e.get("on", []), "off": e.get("off", [])} for e in timemap],
     }), encoding="utf-8")
