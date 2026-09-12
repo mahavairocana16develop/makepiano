@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from .pipeline import run
 from .score import ScoreOptions
+from .separate import STEM_LABELS
 
 ROOT = Path(__file__).parent
 OUT = Path("output")
@@ -33,7 +34,7 @@ class JobRequest(BaseModel):
     split: int = 60
     beat_offset: int = 0
     beats_per_bar: int = 4
-    stem: str = "none"
+    stem: str | list[str] = "all"
     legato: bool = True
     chords: bool = True
     level: str = "both"
@@ -75,21 +76,38 @@ def _level_files(d: Path) -> dict:
     }
 
 
-def _files_for(workdir: Path) -> dict:
-    rel = quote(str(workdir.relative_to(OUT)))
+def _levels_in(d: Path) -> dict:
     levels = {}
     for lv in ("original", "beginner"):
-        if (workdir / lv / "playback.json").exists():
-            levels[lv] = {"label": LEVEL_LABELS[lv], **_level_files(workdir / lv)}
-    if not levels and (workdir / "playback.json").exists():  # pre-levels layout
-        levels["original"] = {"label": LEVEL_LABELS["original"], **_level_files(workdir)}
-    first = next(iter(levels.values()), {})
+        if (d / lv / "playback.json").exists():
+            levels[lv] = {"label": LEVEL_LABELS[lv], **_level_files(d / lv)}
+    if not levels and (d / "playback.json").exists():  # pre-levels layout
+        levels["original"] = {"label": LEVEL_LABELS["original"], **_level_files(d)}
+    return levels
+
+
+def _files_for(workdir: Path) -> dict:
+    rel = quote(str(workdir.relative_to(OUT)))
+    stems = {}
+    sdir = workdir / "stems"
+    if sdir.is_dir():
+        for st in ("none", "other", "piano", "no_vocals"):
+            d = sdir / st
+            if (d / "transcription.mid").exists():
+                lv = _levels_in(d)
+                if lv:
+                    stems[st] = {"label": STEM_LABELS[st], "midi": f"/files/{rel}/stems/{st}/transcription.mid",
+                                 "audio": f"/files/{rel}/stems/{st}/audio.m4a" if (d / "audio.m4a").exists() else None,
+                                 "levels": lv}
+    else:  # pre-stems layouts: one unnamed stem at the job root
+        lv = _levels_in(workdir)
+        if lv:
+            stems["default"] = {"label": "既定", "midi": f"/files/{rel}/transcription.mid",
+                                "audio": f"/files/{rel}/audio_stem.m4a" if (workdir / "audio_stem.m4a").exists() else None,
+                                "levels": lv}
     return {
-        **first,  # backward compatible top-level fields (first level)
-        "levels": levels,
-        "midi": f"/files/{rel}/transcription.mid",
+        "stems": stems,
         "audio_original": f"/files/{rel}/audio_original.m4a" if (workdir / "audio_original.m4a").exists() else None,
-        "audio_stem": f"/files/{rel}/audio_stem.m4a" if (workdir / "audio_stem.m4a").exists() else None,
     }
 
 
@@ -97,13 +115,15 @@ def _files_for(workdir: Path) -> dict:
 def list_results():
     """Previously generated jobs (anything under output/ with playback.json), newest first."""
     def stamp(d: Path):
-        for f in (d / "original" / "playback.json", d / "beginner" / "playback.json", d / "playback.json"):
+        cands = list((d / "stems").glob("*/original/playback.json")) if (d / "stems").is_dir() else []
+        cands += [d / "original" / "playback.json", d / "playback.json"]
+        for f in cands:
             if f.exists():
                 return f.stat().st_mtime
         return None
     dirs = [d for d in OUT.iterdir() if d.is_dir() and stamp(d) is not None]
     dirs.sort(key=stamp, reverse=True)
-    return [{"title": d.name, "files": _files_for(d)} for d in dirs]
+    return [{"title": d.name, "files": f} for d in dirs if (f := _files_for(d))["stems"]]
 
 
 @app.get("/favicon.ico", include_in_schema=False)

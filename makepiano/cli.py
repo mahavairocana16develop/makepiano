@@ -34,9 +34,10 @@ def _opts(a) -> ScoreOptions:
 
 
 def _report(r) -> None:
-    print(f"\nMIDI:     {r.midi}")
-    for lv, d in r.levels.items():
-        print(f"[{lv}]\n  MusicXML: {d['musicxml']}\n  SVG:      {d['svgs'][0].parent} ({len(d['svgs'])} pages)\n  PDF:      {d['pdf']}")
+    for st, sd in (r.stems or {"": {"midi": r.midi, "levels": r.levels}}).items():
+        print(f"\n=== stem: {st or '-'} ===  MIDI: {sd['midi']}")
+        for lv, d in sd["levels"].items():
+            print(f"  [{lv}] PDF: {d['pdf']}  SVG: {len(d['svgs'])} pages")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,12 +55,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("url", help="YouTube URL (any URL yt-dlp supports) or a local audio/video file")
     ap.add_argument("-o", "--out", default="output", help="output directory (default: ./output)")
     _add_score_opts(ap)
-    ap.add_argument("--stem", default="none", choices=["none", "piano", "other", "no_vocals"],
-                    help="source-separate first: piano (piano only), other (no vocals/drums/bass), no_vocals")
+    ap.add_argument("--stem", default="all",
+                    help="comma-separated stems to generate: none, other, piano, no_vocals (default: all)")
     ap.add_argument("--device", default=None, help="torch device: cpu / cuda")
     ap.add_argument("--no-keep-audio", action="store_true", help="delete the downloaded WAV (disables rescore)")
     a = ap.parse_args(argv)
-    _report(run(a.url, Path(a.out), _opts(a), device=a.device, keep_audio=not a.no_keep_audio, stem=a.stem))
+    _report(run(a.url, Path(a.out), _opts(a), device=a.device, keep_audio=not a.no_keep_audio,
+                stem="all" if a.stem == "all" else [x.strip() for x in a.stem.split(",")]))
     return 0
 
 

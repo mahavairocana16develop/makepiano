@@ -30,6 +30,7 @@
   .viewbar { display:flex; gap:8px; margin-top:14px; }
   .viewbar button { padding:8px 16px; font-size:14px; background:#262b36; }
   .viewbar button.on { background:var(--accent); }
+  .viewbar { align-items:center; color:var(--muted); }
   #pianoView { display:none; margin-top:16px; }
   #pianoView canvas { width:100%; height:520px; display:block; border-radius:8px; background:#0b0d12; }
   .spin { display:inline-block; width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--accent); border-radius:50%; animation:s 1s linear infinite; vertical-align:-2px; margin-right:8px; }
@@ -52,11 +53,11 @@
     <button id="go" type="submit">楽譜を作る</button>
   </form>
   <div style="margin-top:14px;color:var(--muted)">
-    音源の種類：
-    <label><input type="radio" name="stem" value="none" checked> ピアノソロ（分離なし）</label>
-    <label><input type="radio" name="stem" value="other"> 歌・ドラム・ベースを除去（伴奏のみ）</label>
-    <label><input type="radio" name="stem" value="piano"> ピアノ成分だけ抽出</label>
-    <label><input type="radio" name="stem" value="no_vocals"> 歌だけ除去</label>
+    作成する音源の種類（後から切り替え可）：
+    <label><input type="checkbox" name="stem" value="none" checked> 分離なし</label>
+    <label><input type="checkbox" name="stem" value="other" checked> 伴奏のみ（歌・ドラム・ベース除去）</label>
+    <label><input type="checkbox" name="stem" value="piano" checked> ピアノのみ</label>
+    <label><input type="checkbox" name="stem" value="no_vocals" checked> 歌だけ除去</label>
   </div>
   <details>
     <summary>詳細設定</summary>
@@ -90,7 +91,7 @@
 const f = document.getElementById('f'), out = document.getElementById('out'), go = document.getElementById('go');
 f.onsubmit = async (e) => {
   e.preventDefault(); go.disabled = true; player.stop(); document.getElementById('player').style.display = 'none';
-  out.innerHTML = '<div class="card"><span class="spin"></span>処理中…（初回はモデルのダウンロードに数分かかります。音源分離ありは曲の長さの1〜2倍ほどかかります）<pre class="log" id="log"></pre></div>';
+  out.innerHTML = '<div class="card"><span class="spin"></span>処理中…（初回はモデルのダウンロードに数分かかります。全種類を作る場合は曲の長さの3〜4倍ほどかかります）<pre class="log" id="log"></pre></div>';
   const body = {
     url: document.getElementById('url').value,
     bpm: document.getElementById('bpm').value ? +document.getElementById('bpm').value : null,
@@ -98,7 +99,7 @@ f.onsubmit = async (e) => {
     split: +document.getElementById('split').value,
     beat_offset: +document.getElementById('off').value,
     beats_per_bar: +document.getElementById('bpb').value,
-    stem: document.querySelector('input[name=stem]:checked').value,
+    stem: [...document.querySelectorAll('input[name=stem]:checked')].map(x => x.value),
     legato: document.getElementById('legato').checked,
     chords: document.getElementById('chords').checked,
   };
@@ -127,17 +128,19 @@ async function loadPast() {
 loadPast();
 
 async function showResult(j) {
-  const fl = j.files, levels = fl.levels || { original: { label: 'オリジナル', ...fl } };
-  const lvBtns = Object.entries(levels).map(([k, v], i) => `<button data-level="${k}" class="lv${i === 0 ? ' on' : ''}">${v.label}</button>`).join('');
+  const fl = j.files, stems = fl.stems;
+  const stemKeys = Object.keys(stems);
+  const stemBtns = stemKeys.map((k, i) => `<button data-stem="${k}" class="st${i === 0 ? ' on' : ''}">${stems[k].label}</button>`).join('');
   out.innerHTML = `<div class="card"><h2 style="margin:0 0 6px">${j.title}</h2>
-    <div class="viewbar" style="margin-top:6px">難易度：${lvBtns}</div>
+    <div class="viewbar" style="margin-top:6px;flex-wrap:wrap">音源：${stemBtns}</div>
+    <div class="viewbar" style="margin-top:6px">難易度：<span id="lvBtns"></span></div>
     <div class="links" id="links"></div>
     <div class="viewbar"><button id="vSheet" class="on">🎼 シートビュー</button><button id="vPiano">🎹 ピアノビュー</button></div>
     <div class="pages" id="pages"></div>
     <div id="pianoView"><canvas id="pianoCanvas"></canvas></div>
     <pre class="log">${j.log.join('\n')}</pre></div>`;
   const pages = document.getElementById('pages');
-  let pianoMode = false;
+  let pianoMode = false, curStem = stemKeys[0], curLevel = null;
   const vs = document.getElementById('vSheet'), vp = document.getElementById('vPiano');
   const setView = piano => {
     pianoMode = piano;
@@ -146,11 +149,17 @@ async function showResult(j) {
     player.setPianoView(piano);
   };
   vs.onclick = () => setView(false); vp.onclick = () => setView(true);
-  async function loadLevel(name) {
-    const lv = levels[name];
-    document.querySelectorAll('button.lv').forEach(b => b.classList.toggle('on', b.dataset.level === name));
+  async function load(stemName, levelName) {
+    const st = stems[stemName];
+    if (!st.levels[levelName]) levelName = Object.keys(st.levels)[0];
+    curStem = stemName; curLevel = levelName;
+    const lv = st.levels[levelName];
+    document.querySelectorAll('button.st').forEach(b => b.classList.toggle('on', b.dataset.stem === stemName));
+    document.getElementById('lvBtns').innerHTML = Object.entries(st.levels).map(([k, v]) =>
+      `<button data-level="${k}" class="lv${k === levelName ? ' on' : ''}">${v.label}</button>`).join('');
+    document.querySelectorAll('button.lv').forEach(b => b.onclick = () => load(curStem, b.dataset.level));
     document.getElementById('links').innerHTML =
-      `${lv.pdf ? `<a href="${lv.pdf}" download>⬇ PDF</a>` : ''}<a href="${fl.midi}" download>⬇ MIDI</a><a href="${lv.musicxml}" download>⬇ MusicXML</a>`;
+      `${lv.pdf ? `<a href="${lv.pdf}" download>⬇ PDF</a>` : ''}<a href="${st.midi}" download>⬇ MIDI</a><a href="${lv.musicxml}" download>⬇ MusicXML</a>`;
     pages.innerHTML = '';
     for (const s of lv.svgs) {                       // inline SVG so notes can be highlighted
       const div = document.createElement('div'); div.className = 'page';
@@ -158,11 +167,11 @@ async function showResult(j) {
       pages.appendChild(div);
     }
     const pb = await (await fetch(lv.playback)).json();
-    player.load(pb, fl, /*keepPosition*/ true);
+    player.load(pb, { audio_original: fl.audio_original, audio_stem: st.audio, stem_label: st.label }, /*keepPosition*/ true);
     if (pianoMode) player.setPianoView(true);
   }
-  document.querySelectorAll('button.lv').forEach(b => b.onclick = () => loadLevel(b.dataset.level));
-  await loadLevel(Object.keys(levels)[0]);
+  document.querySelectorAll('button.st').forEach(b => b.onclick = () => load(b.dataset.stem, curLevel));
+  await load(curStem, 'original');
 }
 
 // ---------------------------------------------------------------- piano view (keyboard + falling notes)
@@ -253,10 +262,11 @@ const player = (() => {
     document.getElementById('fixedBpm').textContent = `(♩=${data.bpm_score || '?'})`;
     mode.innerHTML = '';
     if (files.audio_original) mode.add(new Option('オリジナル サウンド', 'original'));
-    if (files.audio_stem) mode.add(new Option('分離後の伴奏', 'stem'));
+    if (files.audio_stem) mode.add(new Option('分離後の音声（' + (files.stem_label || '') + '）', 'stem'));
     mode.add(new Option('シンセサイザー サウンド（採譜結果）', 'synth'));
     mode.dataset.original = files.audio_original || ''; mode.dataset.stem = files.audio_stem || '';
     if (prevMode && [...mode.options].some(o => o.value === prevMode)) mode.value = prevMode;
+    else if (prevMode === 'stem') mode.value = 'original';
     setupAudio(); applyTimeline();
     el.style.display = 'block';
     seek.value = duration ? Math.round(Math.min(pos, duration) / duration * 1000) : 0;

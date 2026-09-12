@@ -35,19 +35,20 @@ uv run makepiano "https://www.youtube.com/watch?v=..."
 
 | ファイル | 内容 |
 |---|---|
-| `original/score.pdf` | ピアノ譜（オリジナル） |
-| `beginner/score.pdf` | ピアノ譜（初級アレンジ） |
-| `*/score.musicxml` | MuseScore 等で編集可能な楽譜データ |
-| `*/svg/page-NNN.svg` | ページごとの楽譜画像 |
-| `*/playback.json` | Web UI の再生同期用データ |
-| `transcription.mid` | 採譜結果の MIDI（演奏タイミングそのまま） |
-| `source.wav` | ダウンロードした音声（`rescore` 用） |
+| `stems/<種類>/original/score.pdf` | ピアノ譜（オリジナル） |
+| `stems/<種類>/beginner/score.pdf` | ピアノ譜（初級アレンジ） |
+| `stems/<種類>/*/score.musicxml` | MuseScore 等で編集可能な楽譜データ |
+| `stems/<種類>/*/svg/page-NNN.svg` | ページごとの楽譜画像 |
+| `stems/<種類>/*/playback.json` | Web UI の再生同期用データ |
+| `stems/<種類>/transcription.mid` | 採譜結果の MIDI（演奏タイミングそのまま） |
+| `stems/<種類>/source.wav` | 採譜に使った音声（`rescore` 用） |
+| `source_mix.wav` | ダウンロードした元音声 |
 
 主なオプション:
 
 | オプション | 説明 |
 |---|---|
-| `--stem other` | 音源分離してから採譜（下記） |
+| `--stem all` | 作成する音源の種類（既定 all）。`none,other` のようにカンマ区切りで絞れる |
 | `--bpm 120` | ビート追跡を使わず固定テンポにする |
 | `--beats-per-bar 3` | 拍子（3 = 3/4） |
 | `--grid 2` | 最小音価（2=8分, 4=16分, 3=3連） |
@@ -62,19 +63,20 @@ uv run makepiano "https://www.youtube.com/watch?v=..."
 
 ### ボーカル入り・バンド音源から伴奏を取り出す
 
+既定では 4 種類すべてを 1 回の処理で作り、Web UI の結果画面で切り替えられます。時間を節約したいときは絞ります。
+
 ```bash
-uv run makepiano "https://www.youtube.com/watch?v=..." --stem other
+uv run makepiano "https://www.youtube.com/watch?v=..." --stem none,other
 ```
 
 | `--stem` | 内容 | 向いている音源 |
 |---|---|---|
-| `none`（既定） | 分離しない | ピアノソロ |
+| `none` | 分離しない | ピアノソロ |
 | `other` | ボーカル・ドラム・ベースを除去した残り（htdemucs） | ピアノ伴奏の弾き語り・バンド曲。まずはこれ |
 | `piano` | ピアノ成分だけ抽出（htdemucs_6s） | ギターやシンセも混ざるとき。分離品質はやや不安定 |
 | `no_vocals` | ボーカルだけ除去 | ピアノ＋歌 |
 
-初回はモデル（80〜90 MB）をダウンロードします。分離は CPU で曲の長さの 1〜2 倍程度かかります。
-分離後の音声は `source.wav`（元ミックスは `source_mix.wav`）として保存されます。
+初回はモデル（80〜90 MB）をダウンロードします。分離モデルは種類ごとではなく 2 回（htdemucs / htdemucs_6s）だけ実行します。全種類作ると CPU で曲の長さの 3〜4 倍程度かかります。
 
 採譜をやり直さずに、設定を変えて楽譜だけ作り直す:
 
@@ -99,7 +101,7 @@ uv run makepiano-web
 http://127.0.0.1:8000 を開き、URL を貼って「楽譜を作る」。
 PDF / MIDI / MusicXML のダウンロードと、次のプレビュー・再生機能が使えます。
 
-- **難易度切り替え**：オリジナル / 初級を結果画面でいつでも切り替え（再生位置とモードは維持）
+- **音源の種類・難易度の切り替え**：作成済みの音源種類 × オリジナル / 初級を結果画面でいつでも切り替え（再生位置とモードは維持）
 - **シートビュー**：楽譜。再生中は鳴っている音符が赤くハイライトされ、自動スクロールします
 - **ピアノビュー**：88 鍵の鍵盤と落下ノート表示（右手＝青、左手＝緑）。楽譜と同じ量子化済みノートを表示します
 - **再生モード**：「オリジナル サウンド」（元音声）、「分離後の伴奏」（音源分離した場合）、「シンセサイザー サウンド」（採譜結果をブラウザ内のピアノ音源で演奏）

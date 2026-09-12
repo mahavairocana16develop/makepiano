@@ -10,7 +10,7 @@ from pathlib import Path
 from .download import download_audio, sanitize
 from .render import render_svgs, svgs_to_pdf
 from .score import ScoreOptions, midi_to_musicxml
-from .separate import separate
+from .separate import STEMS, separate_all
 from .transcribe import transcribe_to_midi
 
 
@@ -78,16 +78,28 @@ class Result:
     pdf: Path | None
     seconds: float
     log: list[str] = field(default_factory=list)
-    levels: dict[str, dict] = field(default_factory=dict)  # level -> {"dir", "musicxml", "svgs", "pdf"}
+    levels: dict[str, dict] = field(default_factory=dict)  # level -> {"dir", "musicxml", "svgs", "pdf"} (first stem)
+    stems: dict[str, dict] = field(default_factory=dict)   # stem -> {"dir", "midi", "levels"}
 
     def to_json(self) -> dict:
         d = asdict(self)
         return json.loads(json.dumps(d, default=str))
 
 
+def _process_stem(sdir: Path, wav: Path, opts: ScoreOptions, device, log) -> dict:
+    """Transcribe one stem's audio and engrave all levels into sdir."""
+    sdir.mkdir(parents=True, exist_ok=True)
+    midi = transcribe_to_midi(wav, sdir / "transcription.mid", device=device, log=log)
+    levels = _engrave_levels(sdir, wav, midi, opts, log)
+    return {"dir": sdir, "midi": midi, "levels": levels}
+
+
 def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str | None = None,
-        keep_audio: bool = True, stem: str = "none", log=print) -> Result:
+        keep_audio: bool = True, stem: str | list[str] = "all", log=print) -> Result:
+    """stem: "all", one stem name, or a list of stem names (none / other / piano / no_vocals)."""
     opts = opts or ScoreOptions()
+    stems = list(STEMS) if stem == "all" else ([stem] if isinstance(stem, str) else list(stem))
+    stems = [s_ for s_ in STEMS if s_ in stems] or ["none"]
     t0 = time.time()
     lines: list[str] = []
 
@@ -96,36 +108,49 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
         log(msg)
 
     tmp = out_root / "_tmp"
-    wav, title = download_audio(url, tmp, log=_log)
+    mix, title = download_audio(url, tmp, log=_log)
     if opts.title == "Untitled":
         opts.title = title
     workdir = out_root / sanitize(title)
     if workdir.exists():
         shutil.rmtree(workdir)
     workdir.mkdir(parents=True)
+    shutil.move(str(mix), workdir / "source_mix.wav")
+    mix = workdir / "source_mix.wav"
+    _web_audio(mix, workdir / "audio_original.m4a", log=_log)
 
-    if stem != "none":
-        wav = separate(wav, workdir / f"stem_{stem}.wav", stem=stem, device=device, log=_log)
-    midi = transcribe_to_midi(wav, workdir / "transcription.mid", device=device, log=_log)
-    levels = _engrave_levels(workdir, wav, midi, opts, _log)
-    first = next(iter(levels.values()))
-    xml, svgs, pdf = first["musicxml"], first["svgs"], first["pdf"]
-    _web_audio(tmp / "source.wav", workdir / "audio_original.m4a", log=_log)
-    if stem != "none":
-        _web_audio(wav, workdir / "audio_stem.m4a", log=_log)
-
-    if keep_audio:
-        if stem != "none":
-            shutil.move(str(tmp / "source.wav"), workdir / "source_mix.wav")
-            wav.rename(workdir / "source.wav")  # rescore must use the audio that was actually transcribed
+    stem_wavs = separate_all(mix, workdir / "stems", stems, device=device, log=_log) if stems != ["none"] else {"none": mix}
+    results: dict[str, dict] = {}
+    for st in stems:
+        wav = stem_wavs.get(st)
+        if wav is None:
+            continue
+        _log(f"[stem] ===== {st} =====")
+        sdir = workdir / "stems" / st
+        try:
+            results[st] = _process_stem(sdir, wav, opts, device, _log)
+        except Exception as e:  # noqa: BLE001 - one bad stem should not sink the job
+            _log(f"[stem] {st} failed: {e}")
+            continue
+        if st == "none":
+            (sdir / "source.wav").symlink_to(Path("..") / ".." / "source_mix.wav")  # rescore needs audio
         else:
-            shutil.move(str(tmp / "source.wav"), workdir / "source.wav")
-    elif stem != "none":
-        wav.unlink(missing_ok=True)
+            _web_audio(wav, sdir / "audio.m4a", log=_log)
+            if keep_audio:
+                shutil.move(str(wav), sdir / "source.wav")
+            else:
+                wav.unlink(missing_ok=True)
+    if not results:
+        raise RuntimeError("Every stem failed; see log")
+    if not keep_audio:
+        mix.unlink(missing_ok=True)
+        (workdir / "stems" / "none" / "source.wav").unlink(missing_ok=True)
     shutil.rmtree(tmp, ignore_errors=True)
     dt = time.time() - t0
     _log(f"[done] {dt:.1f}s -> {workdir}")
-    return Result(title, workdir, midi, xml, svgs, pdf, dt, lines, levels)
+    first = next(iter(results.values()))
+    lv = next(iter(first["levels"].values()))
+    return Result(title, workdir, first["midi"], lv["musicxml"], lv["svgs"], lv["pdf"], dt, lines, first["levels"], results)
 
 
 def rescore(workdir: Path, opts: ScoreOptions, log=print) -> Result:
@@ -137,11 +162,26 @@ def rescore(workdir: Path, opts: ScoreOptions, log=print) -> Result:
         lines.append(msg)
         log(msg)
 
+    if opts.title == "Untitled":
+        opts.title = workdir.name
+    stems_dir = workdir / "stems"
+    if stems_dir.is_dir():  # current layout: stems/<stem>/{source.wav, transcription.mid, <level>/}
+        results: dict[str, dict] = {}
+        for sdir in sorted(d for d in stems_dir.iterdir() if (d / "transcription.mid").exists()):
+            wav = sdir / "source.wav"
+            if not wav.exists():
+                _log(f"[stem] {sdir.name}: no source.wav, skipped")
+                continue
+            _log(f"[stem] ===== {sdir.name} =====")
+            results[sdir.name] = {"dir": sdir, "midi": sdir / "transcription.mid",
+                                  "levels": _engrave_levels(sdir, wav, sdir / "transcription.mid", opts, _log)}
+        first = next(iter(results.values()))
+        lv = next(iter(first["levels"].values()))
+        return Result(opts.title, workdir, first["midi"], lv["musicxml"], lv["svgs"], lv["pdf"], time.time() - t0, lines,
+                      first["levels"], results)
     midi, wav = workdir / "transcription.mid", workdir / "source.wav"
     if not midi.exists() or not wav.exists():
         raise FileNotFoundError(f"{workdir} needs transcription.mid and source.wav (run without --no-keep-audio)")
-    if opts.title == "Untitled":
-        opts.title = workdir.name
     levels = _engrave_levels(workdir, wav, midi, opts, _log)
     first = next(iter(levels.values()))
     xml, svgs, pdf = first["musicxml"], first["svgs"], first["pdf"]
