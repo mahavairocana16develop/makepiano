@@ -227,6 +227,37 @@ def _root_pc(fig: str) -> int:
 Event = tuple[Fraction, Fraction, list[int], int]  # onset_beats, duration_beats, midis, velocity
 
 
+def _split_hands(hands: dict[str, dict], split_pitch: int, max_notes: int, max_span: int) -> tuple[dict[str, dict], int]:
+    """Re-assign simultaneous notes between the hands so both chords are playable. The fixed split
+    point is only a preference: e.g. a low bass note plus a mid-register chord all below C4 cannot be
+    one left-hand chord, but bass (LH) + chord (RH) is fine when the right hand is free. Returns the new
+    hands dict and the number of notes moved across."""
+    out = {"rh": {}, "lh": {}}
+    moved = 0
+    onsets = sorted(set(hands["rh"]) | set(hands["lh"]))
+    for on in onsets:
+        notes = sorted(hands["rh"].get(on, []) + hands["lh"].get(on, []), key=lambda x: x[0])
+        pitches = [n[0] for n in notes]
+        def ok(group):
+            return len(group) <= max_notes and (not group or group[-1][0] - group[0][0] <= max_span)
+        default_k = sum(1 for p_ in pitches if p_ < split_pitch)
+        best = None
+        for k in range(len(notes) + 1):
+            lh, rh = notes[:k], notes[k:]
+            if not ok(lh) or not ok(rh):
+                continue
+            wrong = abs(k - default_k)  # notes that cross the preferred split point
+            if best is None or wrong < best[0]:
+                best = (wrong, k)
+        k = best[1] if best is not None else default_k
+        moved += abs(k - default_k)
+        if notes[:k]:
+            out["lh"][on] = notes[:k]
+        if notes[k:]:
+            out["rh"][on] = notes[k:]
+    return out, moved
+
+
 def _fit_hands(evs: dict[str, list[Event]], max_notes: int, max_span: int, snap=None) -> tuple[dict[str, list[Event]], int, int]:
     """Make every chord physically playable: at most max_notes per hand within max_span semitones.
     Right hand keeps the melody (top) and hands surplus low notes to the left hand at the same onset;
@@ -523,6 +554,9 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         hand = "rh" if e.pitch >= opts.split_pitch else "lh"
         hands[hand].setdefault(qs, []).append((e.pitch, qe - qs, e.velocity))
 
+    hands, crossed = _split_hands(hands, opts.split_pitch, opts.max_notes, opts.max_span)
+    if crossed:
+        log(f"[score] hand split adjusted for {crossed} notes (chords that would not fit one hand)")
     vel_of: dict[tuple[str, Fraction, int], int] = {h: 0 for h in ()}  # (hand, onset, pitch) -> performed velocity
     for hand in ("rh", "lh"):
         for on, group in hands[hand].items():
