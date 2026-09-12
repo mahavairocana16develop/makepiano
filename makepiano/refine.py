@@ -119,7 +119,7 @@ GRID = {
 
 
 def refine(output_dict: dict, audio16k: np.ndarray, frames_per_second: int, classes_num: int, log=print,
-           report_path: Path | None = None) -> tuple[list, list, dict]:
+           report_path: Path | None = None, progress=None) -> tuple[list, list, dict]:
     """Return (note_events, pedal_events, chosen params) for the best-matching threshold setting."""
     from piano_transcription_inference.utilities import RegressionPostProcessor
 
@@ -131,7 +131,10 @@ def refine(output_dict: dict, audio16k: np.ndarray, frames_per_second: int, clas
     best = None
     combos = list(itertools.product(*GRID.values()))
     log(f"[refine] comparing {len(combos)} threshold settings against the recording")
-    for vals in combos:
+    total_cands = len(combos) + 8
+    for ci, vals in enumerate(combos):
+        if progress:
+            progress(ci / total_cands)
         params = dict(zip(GRID.keys(), vals))
         params = {**params, "pedal_offset_threshold": 0.2}
         pp = RegressionPostProcessor(frames_per_second, classes_num=classes_num, **params)
@@ -150,7 +153,9 @@ def refine(output_dict: dict, audio16k: np.ndarray, frames_per_second: int, clas
     # Stage 2: around the best onset/frame setting, try the note-off and pedal thresholds too.
     stage2 = [dict(best[1], offset_threshold=o, pedal_offset_threshold=pd)
               for o in (0.2, 0.3, 0.5) for pd in (0.1, 0.2, 0.4) if not (o == 0.3 and pd == 0.2)]
-    for params in stage2:
+    for si, params in enumerate(stage2):
+        if progress:
+            progress((len(combos) + si) / total_cands)
         pp = RegressionPostProcessor(frames_per_second, classes_num=classes_num, **params)
         note_events, pedal_events = pp.output_dict_to_midi_events(output_dict)
         notes = [(e["onset_time"], e["offset_time"], e["midi_note"], e["velocity"]) for e in note_events]

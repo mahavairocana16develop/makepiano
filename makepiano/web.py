@@ -50,13 +50,16 @@ def _work(job_id: str, req: JobRequest):
     def log(msg: str):
         job["log"].append(msg)
 
+    def progress(frac, stage, eta):
+        job.update(progress=round(frac, 3), stage=stage, eta=round(eta))
+
     with _lock:
         job["status"] = "running"
         try:
             opts = ScoreOptions(grid=req.grid, split_pitch=req.split, fixed_bpm=req.bpm, beat_offset=req.beat_offset,
                                beats_per_bar=req.beats_per_bar, legato=req.legato, chords=req.chords, level=req.level,
                                max_notes=req.max_notes, max_span=req.max_span)
-            r = run(req.url, OUT, opts, stem=req.stem, force=req.force, refine=req.refine, log=log)
+            r = run(req.url, OUT, opts, stem=req.stem, force=req.force, refine=req.refine, log=log, progress=progress)
             job.update(status="done", title=r.title, files=_files_for(r.workdir))
         except Exception as e:  # noqa: BLE001
             job.update(status="error", error=str(e))
@@ -140,7 +143,7 @@ def favicon():
 @app.post("/api/jobs")
 def create_job(req: JobRequest, bg: BackgroundTasks):
     job_id = uuid.uuid4().hex[:8]
-    JOBS[job_id] = {"id": job_id, "status": "queued", "log": [], "url": req.url}
+    JOBS[job_id] = {"id": job_id, "status": "queued", "log": [], "url": req.url, "progress": 0, "stage": "待機中", "eta": None}
     bg.add_task(_work, job_id, req)
     return {"id": job_id}
 

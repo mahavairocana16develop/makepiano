@@ -37,7 +37,7 @@ def separate(wav: Path, out_wav: Path, stem: str = "other", device: str | None =
 STEM_LABELS = {"none": "分離なし", "other": "伴奏のみ（歌・ドラム・ベース除去）", "piano": "ピアノのみ", "no_vocals": "歌だけ除去"}
 
 
-def separate_all(wav: Path, out_dir: Path, stems: list[str], device: str | None = None, log=print) -> dict[str, Path]:
+def separate_all(wav: Path, out_dir: Path, stems: list[str], device: str | None = None, log=print, progress=None) -> dict[str, Path]:
     """Produce every requested stem WAV with as few model runs as possible. Returns stem -> wav path
     ("none" maps to the input mix)."""
     import torch
@@ -60,6 +60,8 @@ def separate_all(wav: Path, out_dir: Path, stems: list[str], device: str | None 
             save_audio(sum(t for n, t in parts.items() if n != "vocals"), str(result["no_vocals"]), samplerate=sep.samplerate)
         del sep, parts
     if "piano" in stems:
+        if progress and ({"other", "no_vocals"} & set(stems)):
+            progress()  # second model = second planned step
         log(f"[separate] demucs htdemucs_6s on {device} -> piano")
         sep = Separator(model="htdemucs_6s", device=device, progress=False)
         _, parts = sep.separate_audio_file(str(wav))

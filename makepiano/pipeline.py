@@ -11,6 +11,7 @@ from pathlib import Path
 from .download import download_audio, sanitize
 from .render import render_svgs, svgs_to_pdf
 from .score import ScoreOptions, midi_to_musicxml
+from .progress import Tracker
 from .separate import STEMS, separate_all
 from .transcribe import transcribe_to_midi
 
@@ -103,14 +104,18 @@ class Result:
 
 
 def _process_stem(sdir: Path, wav: Path, opts: ScoreOptions, device, log, loudness_db: float | None = None,
-                  refine: bool = True) -> dict:
+                  refine: bool = True, tracker: Tracker | None = None) -> dict:
     """Transcribe one stem's audio (unless already transcribed) and engrave all levels into sdir."""
     sdir.mkdir(parents=True, exist_ok=True)
     midi = sdir / "transcription.mid"
     if midi.exists():
         log(f"[transcribe] reusing {sdir.name}/transcription.mid")
     else:
-        transcribe_to_midi(wav, midi, device=device, log=log, refine=refine)
+        if tracker:
+            tracker.start("transcribe:" + sdir.name)
+        transcribe_to_midi(wav, midi, device=device, log=log, refine=refine, tracker=tracker, step_key=sdir.name)
+    if tracker:
+        tracker.start("engrave:" + sdir.name)
     levels = _engrave_levels(sdir, wav, midi, opts, log, loudness_db)
     return {"dir": sdir, "midi": midi, "levels": levels}
 
@@ -127,7 +132,8 @@ def find_job(out_root: Path, source_id: str) -> Path | None:
 
 
 def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str | None = None,
-        keep_audio: bool = True, stem: str | list[str] = "all", force: bool = False, refine: bool = True, log=print) -> Result:
+        keep_audio: bool = True, stem: str | list[str] = "all", force: bool = False, refine: bool = True, log=print,
+        progress=None) -> Result:
     """stem: "all", one stem name, or a list of stem names (none / other / piano / no_vocals).
     Downloads are cached by video id and an existing job for the same video is extended in place
     (separation and transcription are reused, scores are always re-engraved) unless force=True."""
@@ -141,7 +147,12 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
         lines.append(msg)
         log(msg)
 
+    tracker = Tracker(progress)
+    tracker.add("download", "音声を取得", 8)
+    tracker.start("download")
     cached, title, source_id = download_audio(url, out_root / "_cache", log=_log)
+    import librosa
+    dur = float(librosa.get_duration(path=str(cached)))
     if opts.title == "Untitled":
         opts.title = title
     workdir = find_job(out_root, source_id)
@@ -170,7 +181,23 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
     need_sep = [st for st in stems if st != "none" and st not in have]
     if have:
         _log(f"[stem] already transcribed: {', '.join(sorted(have))}")
-    stem_wavs = separate_all(mix, workdir / "stems", need_sep, device=device, log=_log) if need_sep else {}
+    # Plan the remaining work (seconds per second of audio, measured on Apple Silicon CPU).
+    n_levels = 3 if opts.level == "both" else 1
+    if {"other", "no_vocals"} & set(need_sep):
+        tracker.add("separate", "音源分離（歌・ドラム・ベース）", 0.35 * dur + 2)
+    if "piano" in need_sep:
+        tracker.add("separate", "音源分離（ピアノ）", 0.35 * dur + 2)
+    labels = {"none": "分離なし", "other": "伴奏のみ", "piano": "ピアノのみ", "no_vocals": "歌だけ除去"}
+    for st in stems:
+        if st not in have:
+            tracker.add("transcribe:" + st, f"採譜（{labels[st]}）", 0.2 * dur + 3)
+            if refine:
+                tracker.add("refine:" + st, f"合成比較で最適化（{labels[st]}）", 0.12 * dur + 2)
+        tracker.add("engrave:" + st, f"楽譜化（{labels[st]}）", 1.5 * n_levels + 1)
+    if need_sep:
+        tracker.start("separate")
+    stem_wavs = separate_all(mix, workdir / "stems", need_sep, device=device, log=_log,
+                             progress=lambda: tracker.start("separate")) if need_sep else {}
     stem_wavs["none"] = mix
     results: dict[str, dict] = {}
     for st in stems:
@@ -181,7 +208,7 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
             continue
         _log(f"[stem] ===== {st} =====")
         try:
-            results[st] = _process_stem(sdir, wav, opts, device, _log, loudness, refine=refine)
+            results[st] = _process_stem(sdir, wav, opts, device, _log, loudness, refine=refine, tracker=tracker)
         except Exception as e:  # noqa: BLE001 - one bad stem should not sink the job
             _log(f"[stem] {st} failed: {e}")
             continue
@@ -206,6 +233,7 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
     if not keep_audio:
         mix.unlink(missing_ok=True)
         (workdir / "stems" / "none" / "source.wav").unlink(missing_ok=True)
+    tracker.finish()
     dt = time.time() - t0
     _log(f"[done] {dt:.1f}s -> {workdir}")
     first = next(iter(results.values()))
