@@ -39,6 +39,7 @@ class ScoreOptions:
     pedal_marks: bool = True  # notate the sustain pedal from the transcription
     dynamics_marks: bool = True  # pp..ff from performed velocities
     short_notes: bool = True  # keep clearly short (staccato-like) notes short instead of holding to the next chord
+    held_voices: bool = True  # let a note/chord the performer keeps holding ring across later onsets (2nd voice)
     triplets: str = "16th"   # "off" | "8th" (allow 8th-note triplets per beat) | "16th" (also 16th-note triplets)
     fingering: bool = True   # automatic fingering (numbers in the score, hands in the piano view)
     title: str = "Untitled"
@@ -285,10 +286,7 @@ def _fit_hands(evs: dict[str, list[Event]], max_notes: int, max_span: int, snap=
         while m and (len(m) > max_notes or m[-1] - m[0] > max_span):
             m.pop()
             dropped += 1
-        if i + 1 < len(onsets):
-            dur = min(dur, onsets[i + 1] - on)  # a moved chord may have created a new onset in between
-            if snap is not None:
-                dur = snap(on, dur)
+        # (durations are kept as written; a held chord may overlap a later onset and becomes a second voice)
         lh_out.append((on, dur, m, vel))
     return {"rh": rh_out, "lh": lh_out}, moved, dropped
 
@@ -430,6 +428,16 @@ def _beat_chunks(start: Fraction, end: Fraction) -> list[Fraction]:
     return out
 
 
+def _has_overlap(m: stream.Measure) -> bool:
+    ev = sorted((float(n.offset), float(n.offset + n.quarterLength)) for n in m.notes)
+    end = -1.0
+    for a, b in ev:
+        if a < end - 1e-6:
+            return True
+        end = max(end, b)
+    return False
+
+
 def _fill_rests(m: stream.Measure, beats_per_bar: int) -> None:
     """Fill silence in a measure with rests whose durations sit on the beat grid."""
     bar_len = Fraction(beats_per_bar)
@@ -558,14 +566,18 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
     if crossed:
         log(f"[score] hand split adjusted for {crossed} notes (chords that would not fit one hand)")
     vel_of: dict[tuple[str, Fraction, int], int] = {h: 0 for h in ()}  # (hand, onset, pitch) -> performed velocity
+    dur_of: dict[tuple[str, Fraction, int], Fraction] = {}                 # (hand, onset, pitch) -> performed length (beats)
     for hand in ("rh", "lh"):
         for on, group in hands[hand].items():
-            for pc, _, v in group:
+            for pc, d, v in group:
                 vel_of[(hand, on, pc)] = max(v, vel_of.get((hand, on, pc), 0))
+                dur_of[(hand, on, pc)] = max(d, dur_of.get((hand, on, pc), Fraction(0)))
     # Collapse each onset into one note/chord event with a single duration (monophonic-chord stream per hand).
     evs: dict[str, list[Event]] = {"rh": [], "lh": []}
+    n_held = 0
     for hand in ("rh", "lh"):
         onsets = sorted(hands[hand])
+        held: list[Fraction] = []  # ends of notes currently occupying extra voices (at most 2 extra voices)
         for i, on in enumerate(onsets):
             group = hands[hand][on]
             gap = onsets[i + 1] - on if i + 1 < len(onsets) else None
@@ -580,10 +592,20 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
                         dur = actual
             else:
                 dur = min(d for _, d, _ in group)
-            if gap is not None:
+            actual_max = max(d for _, d, _ in group)
+            held = [h for h in held if h > on]
+            if opts.held_voices and gap is not None and actual_max >= gap + Fraction(1, 2) and len(held) < 2:
+                # The performer kept this ringing while the same hand played on (e.g. a chord held under a
+                # moving bass): keep the real length, it becomes an extra voice in the notation.
+                dur = min(actual_max, gap + 4)
+                held.append(on + dur)
+                n_held += 1
+            elif gap is not None:
                 dur = min(dur, gap)  # avoid overlaps
             dur = snap_dur(on, dur)
             evs[hand].append((on, dur, sorted({pc for pc, _, _ in group}), int(np.mean([v for _, _, v in group]))))
+    if n_held:
+        log(f"[score] {n_held} held notes/chords written as a second voice")
 
     end_beat = max((float(on + dur) for h in evs.values() for on, dur, _, _ in h), default=0.0)
     bars = int(np.ceil(end_beat / opts.beats_per_bar)) or 1
@@ -627,9 +649,14 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
         p.insert(0, cl)
         p.insert(0, meter.TimeSignature(f"{opts.beats_per_bar}/4"))
         for on, dur, midis, vel in evs[hand]:
-            score_notes.extend((float(on + bar_start), float(on + bar_start + dur), m,
-                                vel_of.get((hand, on, m), vel_of.get(("rh" if hand == "lh" else "lh", on, m), vel)),
-                                hand, fingers[hand].get((on, m), 0)) for m in midis)
+            other = "rh" if hand == "lh" else "lh"
+            for m in midis:
+                # Playback keeps the performed length (the notation may show it shorter for legibility,
+                # with the pedal mark carrying the sustain); never shorter than what is written.
+                played = max(dur, min(dur_of.get((hand, on, m), dur_of.get((other, on, m), dur)), dur + 4))
+                score_notes.append((float(on + bar_start), float(on + bar_start + played), m,
+                                    vel_of.get((hand, on, m), vel_of.get((other, on, m), vel)),
+                                    hand, fingers[hand].get((on, m), 0)))
             pitches = [pitch.Pitch(midi=m) for m in midis]  # note.Note(int) adds explicit naturals
             obj = note.Note(pitches[0]) if len(pitches) == 1 else chord.Chord(pitches)
             obj.quarterLength = float(dur)
@@ -683,7 +710,12 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
             p.append(m)
         p.makeTies(inPlace=True)
         for m in p.getElementsByClass(stream.Measure):
-            _fill_rests(m, opts.beats_per_bar)
+            if _has_overlap(m):
+                m.makeVoices(inPlace=True, fillGaps=False)
+                for v in m.voices:
+                    _fill_rests(v, opts.beats_per_bar)
+            else:
+                _fill_rests(m, opts.beats_per_bar)
         # Show accidentals relative to the key signature (and cancel with naturals), measure by measure.
         p.makeAccidentals(inPlace=True, overrideStatus=True, cautionaryNotImmediateRepeat=False)
 
