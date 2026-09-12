@@ -238,86 +238,135 @@ const pianoView = (() => {
   const hands = { rh: null, lh: null };
   const SKIN = '#f2cfae', SKIN_DARK = '#d9a77f', SKIN_LINE = '#b7845c', NAIL = '#fbe9dc';
   function lerp(a, b, k) { return a + (b - a) * k; }
+  // Natural finger spacing (in white-key widths) and relative reach (2-3-4 are longer than 1 and 5).
+  const SPACING = { 1: 1.5, 2: 1.0, 3: 1.0, 4: 1.0 };   // gap between finger f and f+1 when relaxed
+  const REACH = { 1: 0.0, 2: 0.55, 3: 0.75, 4: 0.6, 5: 0.25 };  // fraction of key height the tip reaches up
   function drawHands(pb, t, rollH) {
-    const st = fingerState(pb, t), top = rollH, kb = rollH + KH, band = kb + HB;
+    const st = fingerState(pb, t), top = rollH, kb = rollH + KH;
     for (const h of ['rh', 'lh']) {
-      const known = st[h], dir = h === 'rh' ? 1 : -1;
+      const known = st[h], dir = h === 'rh' ? 1 : -1;   // +1: finger 5 is to the right of the thumb
       const knownF = Object.keys(known).map(Number);
       if (!knownF.length && !hands[h]) continue;
-      // targets: known fingers on their keys, others spaced naturally beside the nearest known finger
-      const anchorF = knownF.length ? knownF[0] : 3;
-      const anchorX = knownF.length ? keyCenter(known[anchorF].pitch) : hands[h].fingers[3].x;
+      // 1) fixed points: fingers that are pressing now (or were within the last 0.4 s) stay on their keys
+      const fixed = {};
+      for (const f of knownF) if (known[f].pressed || known[f].age < 0.4) fixed[f] = keyCenter(known[f].pitch);
+      // fall back to the most recent finger so the hand has a location
+      if (!Object.keys(fixed).length) { const f = knownF.sort((a, b) => known[a].age - known[b].age)[0]; if (f) fixed[f] = keyCenter(known[f].pitch); }
+      // 2) place the other fingers by natural spacing from the nearest fixed finger, keeping the order 1..5
+      const x = {};
+      const fixedF = Object.keys(fixed).map(Number).sort((a, b) => a - b);
+      for (let f = 1; f <= 5; f++) {
+        if (fixed[f] != null) { x[f] = fixed[f]; continue; }
+        const below = fixedF.filter(g => g < f).pop(), above = fixedF.find(g => g > f);
+        const span = (a, b) => { let d = 0; for (let g = a; g < b; g++) d += SPACING[g]; return d * keyW; };
+        if (below != null && above != null) x[f] = fixed[below] + (fixed[above] - fixed[below]) * span(below, f) / span(below, above);
+        else if (below != null) x[f] = fixed[below] + dir * span(below, f);
+        else x[f] = fixed[above] - dir * span(f, above);
+      }
+      // 3) anatomy: fingers never cross; keep at least 0.7 key between neighbours, at most 2.2 keys (1-2: 3.2)
+      for (let f = 2; f <= 5; f++) {
+        const minGap = keyW * 0.7 * dir, maxGap = keyW * (f === 2 ? 3.2 : 2.2) * dir;
+        const gap = x[f] - x[f - 1];
+        if (dir > 0 ? gap < minGap : gap > minGap) x[f] = x[f - 1] + minGap;
+        if (dir > 0 ? gap > maxGap : gap < maxGap) if (fixed[f] == null) x[f] = x[f - 1] + maxGap;
+      }
+      for (let f = 4; f >= 1; f--) {  // second pass from the other side so fixed fingers win
+        const minGap = keyW * 0.7 * dir;
+        const gap = x[f + 1] - x[f];
+        if ((dir > 0 ? gap < minGap : gap > minGap) && fixed[f] == null) x[f] = x[f + 1] - minGap;
+      }
       const target = {};
       for (let f = 1; f <= 5; f++) {
-        const k = known[f];
-        const x = k ? keyCenter(k.pitch) : anchorX + dir * (f - anchorF) * keyW * 1.05;
-        // tip y: pressing -> on the key (black keys sit higher); resting -> hovering near the key front
-        const onBlack = k && isBlack(k.pitch);
-        const y = k && k.pressed ? (onBlack ? top + KH * 0.30 : top + KH * 0.62) : kb - 8;
-        const press = k && k.pressed ? 1 : 0;
-        target[f] = { x, y, press, recent: k ? Math.max(0, 1 - k.age / 1.5) : 0 };
+        const k = known[f], pressed = !!(k && k.pressed), onBlack = k && isBlack(k.pitch);
+        const y = pressed ? (onBlack ? top + KH * 0.30 : top + KH * 0.62) : kb - 6 - KH * REACH[f] * 0.5;
+        target[f] = { x: x[f], y, press: pressed ? 1 : 0 };
       }
       if (!hands[h]) hands[h] = { fingers: Object.fromEntries([1,2,3,4,5].map(f => [f, { ...target[f] }])), palmX: target[3].x };
       const H = hands[h];
       for (let f = 1; f <= 5; f++) {
         const cur = H.fingers[f], tg = target[f];
-        cur.x = lerp(cur.x, tg.x, 0.22); cur.y = lerp(cur.y, tg.y, 0.35); cur.press = lerp(cur.press, tg.press, 0.4); cur.recent = tg.recent;
+        cur.x = lerp(cur.x, tg.x, 0.2); cur.y = lerp(cur.y, tg.y, 0.35); cur.press = lerp(cur.press, tg.press, 0.4);
       }
       H.palmX = lerp(H.palmX, (H.fingers[2].x + H.fingers[3].x + H.fingers[4].x) / 3, 0.15);
-      drawHand(H, dir, kb, band, h);
+      drawHand(H, dir, kb, kb + HB, h);
     }
   }
   function drawHand(H, dir, kb, band, h) {
-    const F = H.fingers, palmY = kb + 34, palmW = keyW * 4.6, palmH = 52;
-    const tint = h === 'rh' ? 'rgba(108,140,255,0.28)' : 'rgba(79,195,154,0.28)';
-    // wrist + palm (rounded shape); fingers grow out of its top edge
+    const F = H.fingers;
+    const palmW = keyW * 4.4, palmH = 58, palmTop = kb + 30, palmY = palmTop + palmH;   // palm spans knuckles..wrist
+    const tint = h === 'rh' ? 'rgba(108,140,255,0.22)' : 'rgba(79,195,154,0.22)';
+    const px = H.palmX;
+    // knuckle x positions across the palm top (2..5), thumb base on the outer lower side
+    const kx = f => px + dir * (f - 3.5) * palmW * 0.24;
+    const knuckleY = palmTop + 6;
     ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 4;
-    ctx.fillStyle = SKIN; ctx.strokeStyle = SKIN_LINE; ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.roundRect(H.palmX - palmW * 0.32, palmY + palmH * 0.55, palmW * 0.64, HB, 14); ctx.fill();  // wrist/forearm
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    // ---- wrist / forearm
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 12; ctx.shadowOffsetY = 5;
+    ctx.fillStyle = SKIN;
+    ctx.beginPath(); ctx.roundRect(px - palmW * 0.3, palmY - 10, palmW * 0.6, band - palmY + 30, 16); ctx.fill();
+    // ---- palm: knuckle bumps on top, gentle taper to the wrist, thumb-side bulge
+    const g = ctx.createRadialGradient(px - dir * palmW * 0.1, palmTop + palmH * 0.45, 4, px, palmTop + palmH * 0.5, palmW * 0.8);
+    g.addColorStop(0, '#f6d9bd'); g.addColorStop(1, SKIN_DARK);
+    ctx.fillStyle = g; ctx.strokeStyle = SKIN_LINE; ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.moveTo(H.palmX - palmW / 2, palmY + 6);
-    ctx.quadraticCurveTo(H.palmX - palmW / 2 - 6, palmY + palmH, H.palmX - palmW * 0.3, palmY + palmH);
-    ctx.lineTo(H.palmX + palmW * 0.3, palmY + palmH);
-    ctx.quadraticCurveTo(H.palmX + palmW / 2 + 6, palmY + palmH, H.palmX + palmW / 2, palmY + 6);
-    ctx.quadraticCurveTo(H.palmX, palmY - 10, H.palmX - palmW / 2, palmY + 6);
+    const L = px - palmW / 2, R = px + palmW / 2;
+    ctx.moveTo(L, knuckleY + 10);
+    for (const f of [5, 4, 3, 2].map(v => dir > 0 ? v : 7 - v)) {              // bumps left->right
+      const cx = kx(f), w = palmW * 0.24;
+      ctx.quadraticCurveTo(cx - w * 0.5, knuckleY - 6, cx, knuckleY - 4);
+      ctx.quadraticCurveTo(cx + w * 0.5, knuckleY - 6, cx + w * 0.5, knuckleY + 2);
+    }
+    ctx.lineTo(R, knuckleY + 10);
+    // thumb side: the ball of the thumb bulges outward (left side for the right hand)
+    const thumbSide = dir > 0 ? L : R, otherSide = dir > 0 ? R : L;
+    ctx.quadraticCurveTo(otherSide + (dir > 0 ? 2 : -2), palmY - 8, px + dir * palmW * 0.3, palmY);
+    ctx.lineTo(px - dir * palmW * 0.3, palmY);
+    ctx.quadraticCurveTo(thumbSide - dir * 10, palmY - 14, thumbSide - dir * 6, palmTop + palmH * 0.45);
+    ctx.quadraticCurveTo(thumbSide - dir * 4, knuckleY + 14, thumbSide, knuckleY + 10);
     ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.shadowColor = 'transparent';
     ctx.fillStyle = tint; ctx.fill();
-    // fingers, back to front (5..2 then thumb on top so it overlaps naturally)
-    const order = [5, 4, 3, 2, 1];
-    for (const f of order) {
-      const fg = F[f];
-      const baseX = H.palmX + (f === 1 ? -dir * palmW * 0.55 : (f - 3.5) * dir * palmW * 0.22), baseY = f === 1 ? palmY + 26 : palmY + 4;
-      const len = Math.hypot(fg.x - baseX, fg.y - baseY);
-      const w = f === 1 ? keyW * 0.95 : f === 5 ? keyW * 0.7 : keyW * 0.85;
-      // slight curl when resting: control point bows outward, tip comes back; pressing straightens it
-      const curl = (1 - fg.press) * 10;
-      const mx = (baseX + fg.x) / 2 + (f === 1 ? -dir * 8 : 0), my = (baseY + fg.y) / 2 - curl;
-      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-      ctx.strokeStyle = SKIN_LINE; ctx.lineWidth = w + 2.4;
-      ctx.beginPath(); ctx.moveTo(baseX, baseY); ctx.quadraticCurveTo(mx, my, fg.x, fg.y); ctx.stroke();
-      ctx.strokeStyle = fg.press > 0.5 ? SKIN_DARK : SKIN; ctx.lineWidth = w;
-      ctx.beginPath(); ctx.moveTo(baseX, baseY); ctx.quadraticCurveTo(mx, my, fg.x, fg.y); ctx.stroke();
-      // joint creases
-      ctx.strokeStyle = 'rgba(160,110,80,0.35)'; ctx.lineWidth = 1;
-      for (const q of (f === 1 ? [0.5] : [0.38, 0.68])) {
-        const jx = (1 - q) * (1 - q) * baseX + 2 * (1 - q) * q * mx + q * q * fg.x, jy = (1 - q) * (1 - q) * baseY + 2 * (1 - q) * q * my + q * q * fg.y;
-        const ang = Math.atan2(fg.y - baseY, fg.x - baseX);
-        ctx.beginPath(); ctx.moveTo(jx - Math.sin(ang) * w * 0.38, jy + Math.cos(ang) * w * 0.38); ctx.lineTo(jx + Math.sin(ang) * w * 0.38, jy - Math.cos(ang) * w * 0.38); ctx.stroke();
+    // ---- fingers 2..5: three phalanges from the knuckle to the tip, bending at the joints
+    const finger = (f, baseX, baseY, tipX, tipY, w, segs) => {
+      const fg = F[f], press = fg.press;
+      const dx = tipX - baseX, dy = tipY - baseY, len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len, ny = dx / len;                    // normal, for the joint bend
+      const bend = (1 - press) * 6 + 2;                       // resting fingers arch a little
+      const pts = [[baseX, baseY]];
+      let acc = 0;
+      for (let i = 0; i < segs.length; i++) { acc += segs[i]; const q = Math.min(acc, 1); const arch = Math.sin(q * Math.PI) * bend; pts.push([baseX + dx * q + nx * arch * dir, baseY + dy * q + ny * arch]); }
+      const widths = segs.map((_, i) => w * (1 - i * 0.12));
+      const stroke = (col, extra) => {
+        for (let i = 0; i < pts.length - 1; i++) {
+          ctx.strokeStyle = col; ctx.lineWidth = widths[i] + extra;
+          ctx.beginPath(); ctx.moveTo(pts[i][0], pts[i][1]); ctx.lineTo(pts[i + 1][0], pts[i + 1][1]); ctx.stroke();
+        }
+      };
+      stroke(SKIN_LINE, 2.6);
+      stroke(press > 0.5 ? SKIN_DARK : SKIN, 0);
+      // highlight along the top edge, crease at each joint
+      ctx.globalAlpha = 0.35; stroke('#fff4e8', -w * 0.55); ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(150,100,70,0.45)'; ctx.lineWidth = 1;
+      for (let i = 1; i < pts.length - 1; i++) {
+        const [jx, jy] = pts[i], ww = widths[i] * 0.42;
+        ctx.beginPath(); ctx.moveTo(jx - nx * ww, jy - ny * ww); ctx.lineTo(jx + nx * ww, jy + ny * ww); ctx.stroke();
       }
-      // nail + number
-      ctx.fillStyle = fg.press > 0.5 ? '#f7d6c8' : NAIL; ctx.strokeStyle = SKIN_LINE; ctx.lineWidth = 0.8;
-      ctx.beginPath(); ctx.ellipse(fg.x, fg.y - 1, w * 0.3, w * 0.38, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = fg.press > 0.5 ? '#c0392b' : '#5a3d2b'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(String(f), fg.x, fg.y + 4 + (fg.press > 0.5 ? 0 : 0));
-      if (fg.press > 0.5) {  // touch glow on the key
-        ctx.fillStyle = h === 'rh' ? 'rgba(108,140,255,0.35)' : 'rgba(79,195,154,0.35)';
-        ctx.beginPath(); ctx.ellipse(fg.x, fg.y, w * 0.9, w * 0.55, 0, 0, Math.PI * 2); ctx.fill();
-      }
-    }
+      // nail
+      const [tx, ty] = pts[pts.length - 1];
+      ctx.fillStyle = press > 0.5 ? '#f3cdbd' : NAIL; ctx.strokeStyle = SKIN_LINE; ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.ellipse(tx + dx / len * 1.5, ty + dy / len * 1.5, widths[widths.length - 1] * 0.3, widths[widths.length - 1] * 0.4, Math.atan2(dy, dx) + Math.PI / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      if (press > 0.5) { ctx.fillStyle = h === 'rh' ? 'rgba(108,140,255,0.35)' : 'rgba(79,195,154,0.35)'; ctx.beginPath(); ctx.ellipse(tx, ty, w * 0.9, w * 0.55, 0, 0, Math.PI * 2); ctx.fill(); }
+      ctx.fillStyle = press > 0.5 ? '#b03a2e' : '#5a3d2b'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(String(f), tx, ty + 4);
+    };
+    const order = dir > 0 ? [5, 4, 3, 2] : [2, 3, 4, 5];   // draw the far side first
+    const widthOf = { 2: 0.86, 3: 0.9, 4: 0.82, 5: 0.7 };
+    for (const f of order) finger(f, kx(f), knuckleY, F[f].x, F[f].y, keyW * widthOf[f], [0.42, 0.32, 0.26]);
+    // ---- thumb: from the side of the palm, two phalanges, angled inward
+    finger(1, thumbSide + dir * 4, palmTop + palmH * 0.5, F[1].x, F[1].y, keyW * 0.98, [0.55, 0.45]);
     ctx.fillStyle = h === 'rh' ? RH_COL : LH_COL; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText(h === 'rh' ? '右手' : '左手', H.palmX, palmY + palmH + 22);
+    ctx.fillText(h === 'rh' ? '右手' : '左手', px, band - 8);
     ctx.textAlign = 'left';
     ctx.restore();
   }

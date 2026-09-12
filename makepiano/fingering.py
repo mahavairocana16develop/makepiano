@@ -64,6 +64,22 @@ def _transition_cost(prev: tuple[tuple[int, int], ...], cur: tuple[tuple[int, in
     return c / max(1, len(prev) * len(cur)) * 1.5
 
 
+def _order_cost(recent: list[tuple[int, int]], cur: tuple[tuple[int, int], ...], hand: str) -> float:
+    """Penalise placing a finger on the wrong side of a finger used a few notes ago (the hand does not
+    reshuffle that fast). Thumb-under / thumb-over is tolerated; other crossings are expensive."""
+    c = 0.0
+    for fp, pp in recent:
+        for fc, pc in cur:
+            if fp == fc or pp == pc:
+                continue
+            # expected: higher finger number sits on the higher key (right hand) / lower key (left hand)
+            expect_higher = (fc > fp) if hand == "rh" else (fc < fp)
+            actually_higher = pc > pp
+            if expect_higher != actually_higher:
+                c += 1.0 if 1 in (fp, fc) else 4.0
+    return c
+
+
 def assign(events: list[tuple[Fraction, list[int]]], hand: str) -> dict[tuple[Fraction, int], int]:
     """Viterbi over per-event finger combinations. events: chronological (onset, sorted pitches)."""
     if not events:
@@ -82,6 +98,7 @@ def assign(events: list[tuple[Fraction, list[int]]], hand: str) -> dict[tuple[Fr
     INF = float("inf")
     cost = [[_chord_cost(tuple(f for f, _ in o), [p for _, p in o], hand) for o in cands[0]]]
     back: list[list[int]] = [[-1] * len(cands[0])]
+    LOOKBACK = 3
     for i in range(1, len(events)):
         gap = float(events[i][0] - events[i - 1][0])
         row, bk = [], []
@@ -90,6 +107,15 @@ def assign(events: list[tuple[Fraction, list[int]]], hand: str) -> dict[tuple[Fr
             best, arg = INF, -1
             for j, po in enumerate(cands[i - 1]):
                 c = cost[i - 1][j] + _transition_cost(po, o, hand, gap)
+                # ordering against the notes before the previous one, following j's best path
+                recent, jj, k = [], j, i - 1
+                while k >= max(0, i - LOOKBACK) and jj >= 0:
+                    if k < i - 1:
+                        recent.extend(cands[k][jj])
+                    jj = back[k][jj] if k > 0 else -1
+                    k -= 1
+                if recent:
+                    c += _order_cost(recent, o, hand)
                 if c < best:
                     best, arg = c, j
             row.append(best + local)
