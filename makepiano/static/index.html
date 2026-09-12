@@ -65,6 +65,11 @@
     <label><input type="checkbox" name="stem" value="piano" checked> ピアノのみ</label>
     <label><input type="checkbox" name="stem" value="no_vocals" checked> 歌だけ除去</label>
   </div>
+  <div style="margin-top:10px;color:var(--muted)">
+    楽譜の方針：
+    <label><input type="radio" name="fidelity" value="faithful" checked> 演奏に忠実（三連符・短い音・ペダル・強弱を記譜）</label>
+    <label><input type="radio" name="fidelity" value="clean"> 読みやすさ優先（16分格子、次の和音まで伸ばす）</label>
+  </div>
   <details>
     <summary>詳細設定</summary>
     <label>BPM（空=自動）<input type="number" id="bpm" step="0.1" placeholder="auto"></label>
@@ -123,6 +128,7 @@ f.onsubmit = async (e) => {
     max_span: +document.getElementById('span').value,
     refine: document.getElementById('refine').checked,
     triplets: document.getElementById('trip').value,
+    fidelity: document.querySelector('input[name=fidelity]:checked').value,
   };
   const r = await fetch('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   const {id} = await r.json();

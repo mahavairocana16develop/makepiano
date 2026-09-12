@@ -43,6 +43,7 @@ class JobRequest(BaseModel):
     max_notes: int = 5
     max_span: int = 12
     triplets: str = "16th"
+    fidelity: str = "faithful"  # "faithful" | "clean"
 
 
 def _work(job_id: str, req: JobRequest):
@@ -59,7 +60,9 @@ def _work(job_id: str, req: JobRequest):
         try:
             opts = ScoreOptions(grid=req.grid, split_pitch=req.split, fixed_bpm=req.bpm, beat_offset=req.beat_offset,
                                beats_per_bar=req.beats_per_bar, legato=req.legato, chords=req.chords, level=req.level,
-                               max_notes=req.max_notes, max_span=req.max_span, triplets=req.triplets)
+                               max_notes=req.max_notes, max_span=req.max_span,
+                               triplets="off" if req.fidelity == "clean" else req.triplets,
+                               short_notes=req.fidelity != "clean")
             r = run(req.url, OUT, opts, stem=req.stem, force=req.force, refine=req.refine, log=log, progress=progress)
             job.update(status="done", title=r.title, files=_files_for(r.workdir))
         except Exception as e:  # noqa: BLE001
