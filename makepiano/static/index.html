@@ -190,6 +190,7 @@ const pianoView = (() => {
 })();
 
 // ---------------------------------------------------------------- player
+const SYNTH_ADSR = [0.005, 1.0, 0.3, 0.3];  // attack, decay, sustain level, release (seconds / ratio)
 const player = (() => {
   const el = document.getElementById('player'), pp = document.getElementById('pp'), mode = document.getElementById('mode'),
         seek = document.getElementById('seek'), timeEl = document.getElementById('time'), rateEl = document.getElementById('rate'),
@@ -221,7 +222,13 @@ const player = (() => {
   async function ensureSynth() {
     if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
     if (ac.state === 'suspended') await ac.resume();
-    if (!piano) { status.textContent = 'ピアノ音源を読み込み中…'; piano = await Soundfont.instrument(ac, 'acoustic_grand_piano'); status.textContent = ''; }
+    if (!piano) {
+      status.textContent = 'ピアノ音源を読み込み中…';
+      // MusyngKite grand piano, shaped to match Klangio's synth: its samples decay faster (C4: -20 dB at ~0.7 s
+      // vs ~2 s) with similar brightness, so a decay/sustain envelope brings the two close.
+      piano = await Soundfont.instrument(ac, 'acoustic_grand_piano', { soundfont: 'MusyngKite', gain: 1.6 });
+      status.textContent = '';
+    }
   }
   function current() {
     if (!playing) return +seek.value / 1000 * duration;
@@ -237,7 +244,9 @@ const player = (() => {
       for (const [s, e, p, v] of pb.notes) {
         if (e <= t0) continue;
         const when = ac.currentTime + Math.max(0, (s - t0) / r);
-        piano.play(p, when, { duration: Math.max(0.05, (e - Math.max(s, t0)) / r), gain: Math.min(1, v / 100) });
+        piano.play(p, when, { duration: Math.max(0.05, (e - Math.max(s, t0)) / r),
+                              gain: 0.55 + 0.45 * Math.min(1, v / 100),   // Klangio plays a nearly flat velocity
+                              adsr: SYNTH_ADSR });
       }
     } else {
       if (!audio) setupAudio();
