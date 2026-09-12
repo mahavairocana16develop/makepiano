@@ -235,7 +235,21 @@ const player = (() => {
   let src = null, pb = null, audio = null, ac = null, piano = null, playing = false, duration = 0;
   const fixedEl = document.getElementById('fixed'), fixedWrap = document.getElementById('fixedWrap');
   const revEl = document.getElementById('reverb'), revWrap = document.getElementById('revWrap');
-  let wet = null;
+  let wet = null, master = null, analyser = null, agcBuf = null;
+  // Slow automatic gain: steer the synth's measured RMS towards the original recording's RMS (pb.loudness_db).
+  function autoLevel() {
+    if (!analyser || !playing || !isSynth()) return;
+    const target = (src && src.loudness_db != null) ? src.loudness_db : -20;
+    agcBuf ??= new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(agcBuf);
+    let sum = 0; for (let i = 0; i < agcBuf.length; i++) sum += agcBuf[i] * agcBuf[i];
+    const rms = Math.sqrt(sum / agcBuf.length);
+    if (rms < 0.005) return;                                   // silence: don't crank the gain
+    const db = 20 * Math.log10(rms), diff = target - db;       // >0: too quiet
+    const g = Math.min(12, Math.max(0.3, master.gain.value * Math.pow(10, diff / 20 * 0.15)));  // 15 % of the way per tick
+    master.gain.setTargetAtTime(g, ac.currentTime, 0.2);
+  }
+  setInterval(autoLevel, 150);
   let synthStartT = 0, synthStartCtx = 0, raf = 0, lastIdx = -1, lit = new Set(), pianoOn = false;
   const fmt = t => `${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}`;
   const rate = () => +rateEl.value;
@@ -288,9 +302,14 @@ const player = (() => {
       // vs ~2 s) with similar brightness, so a decay/sustain envelope brings the two close.
       // Room: the soundfont is bone-dry, the separated accompaniment is not. Synthetic IR (decaying noise)
       // through a convolver, mixed in parallel with the dry signal; amount from the 残響 slider.
-      const bus = ac.createGain(); bus.connect(ac.destination);
+      // bus -> compressor -> master (auto-levelled to the original recording's RMS) -> out (+ reverb send)
+      const bus = ac.createGain();
+      const comp = ac.createDynamicsCompressor(); comp.threshold.value = -18; comp.knee.value = 12; comp.ratio.value = 3; comp.attack.value = 0.005; comp.release.value = 0.25;
+      master = ac.createGain(); master.gain.value = 2.5;
+      bus.connect(comp); comp.connect(master); master.connect(ac.destination);
+      analyser = ac.createAnalyser(); analyser.fftSize = 2048; master.connect(analyser);
       const conv = ac.createConvolver(); conv.buffer = makeIR(ac, 1.8, 2.5); wet = ac.createGain();
-      bus.connect(conv); conv.connect(wet); wet.connect(ac.destination); setReverb();
+      master.connect(conv); conv.connect(wet); wet.connect(ac.destination); setReverb();
       piano = await Soundfont.instrument(ac, 'acoustic_grand_piano', { soundfont: 'MusyngKite', gain: 1.4, destination: bus, release: 0.35 });
       status.textContent = '';
     }
@@ -364,7 +383,7 @@ const player = (() => {
   fixedEl.onchange = () => { const was = playing; stop(); applyTimeline(); lastIdx = -1; if (pianoOn) pianoView.draw(pb, current()); if (was) play(); };
   rateEl.onchange = () => { const was = playing; if (was) stop(); if (audio) audio.playbackRate = rate(); if (was) play(); };
   document.addEventListener('keydown', e => { if (e.code === 'Space' && pb && e.target.tagName !== 'INPUT') { e.preventDefault(); pp.onclick(); } });
-  return { load, stop, setPianoView };
+  return { load, stop, setPianoView, debug: () => ({ masterGain: master ? master.gain.value : null, target: src && src.loudness_db }) };
 })();
 </script>
 </body>

@@ -62,7 +62,7 @@ def index():
     return (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
 
-LEVEL_LABELS = {"original": "オリジナル", "beginner": "初級"}
+LEVEL_LABELS = {"original": "オリジナル", "intermediate": "中級", "beginner": "初級"}
 
 
 def _level_files(d: Path) -> dict:
@@ -78,7 +78,7 @@ def _level_files(d: Path) -> dict:
 
 def _levels_in(d: Path) -> dict:
     levels = {}
-    for lv in ("original", "beginner"):
+    for lv in ("original", "intermediate", "beginner"):
         if (d / lv / "playback.json").exists():
             levels[lv] = {"label": LEVEL_LABELS[lv], **_level_files(d / lv)}
     if not levels and (d / "playback.json").exists():  # pre-levels layout

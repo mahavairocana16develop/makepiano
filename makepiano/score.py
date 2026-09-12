@@ -33,7 +33,7 @@ class ScoreOptions:
     legato: bool = True      # hold each note/chord until the next onset in the same hand ("pop" style)
     max_hold_beats: float = 2.0  # ...but never stretch a note by more than this
     chords: bool = True      # add chord symbols above the treble staff
-    level: str = "both"      # "both" | "original" | "beginner" (melody + chord-root bass, 8th-note grid)
+    level: str = "both"      # "both" (=all) | "original" | "intermediate" | "beginner"
     title: str = "Untitled"
 
 
@@ -238,6 +238,61 @@ def _estimate_key(notes: list[tuple[float, float, list[int]]], log=print) -> key
     return k
 
 
+_TEMPLATE_BY_NAME = dict(_CHORD_TEMPLATES)
+
+
+def _chord_pcs(fig: str) -> set[int]:
+    root = _root_pc(fig)
+    name = fig[2:] if len(fig) > 1 and fig[1] in "#-" else fig[1:]
+    return {(root + i) % 12 for i in _TEMPLATE_BY_NAME.get(name, (0, 4, 7))}
+
+
+def _bass_root(fig: str) -> int:
+    m = 36 + _root_pc(fig)
+    return m + 12 if m < 40 else m  # E2..D#3
+
+
+def _simplify_intermediate(evs: dict[str, list[Event]], symbols: list[tuple[float, str]], bars: int,
+                           beats_per_bar: int, window: float = 2.0) -> dict[str, list[Event]]:
+    """Intermediate arrangement: melody plus up to two chord tones on the beats; root-fifth alternating bass."""
+    sym_at = sorted(symbols)
+    # chord in effect at any beat position
+    def chord_at(b: float) -> str | None:
+        cur = None
+        for off, fig in sym_at:
+            if off <= b + 1e-6:
+                cur = fig
+            else:
+                break
+        return cur
+    rh: list[Event] = []
+    for on, dur, midis, vel in evs["rh"]:
+        m = max(midis)
+        while m > 84:
+            m -= 12
+        notes = [m]
+        fig = chord_at(float(on))
+        if fig is not None and float(on) == int(float(on)):  # harmony only on the beat, keeps it playable
+            pcs = _chord_pcs(fig) - {m % 12}
+            tones = [x for x in range(m - 1, m - 12, -1) if x % 12 in pcs][:2]
+            notes = sorted(tones) + [m]
+        rh.append((on, dur, notes, vel))
+    lh: list[Event] = []
+    total = bars * beats_per_bar
+    b = 0.0
+    while b < total:
+        fig = chord_at(b)
+        if fig is None:
+            b += 1
+            continue
+        root = _bass_root(fig)
+        fifth = root + 7 if root + 7 <= 55 else root - 5
+        pitch_ = root if int(b) % 2 == 0 else fifth
+        lh.append((Fraction(int(b)), Fraction(1), [pitch_], 80))
+        b += 1
+    return {"rh": rh, "lh": lh}
+
+
 def _simplify_beginner(evs: dict[str, list[Event]], symbols: list[tuple[float, str]], bars: int,
                        beats_per_bar: int, window: float = 2.0) -> dict[str, list[Event]]:
     """Beginner arrangement: right hand = top-line melody only, left hand = chord root every half bar."""
@@ -382,15 +437,18 @@ def build_score(events: list[NoteEvent], beat_times: np.ndarray, bpm: float, opt
     all_notes = [(float(on), float(dur), midis) for h in evs.values() for on, dur, midis, _ in h]
     # Chord detection needs a key preference for spelling; estimate the key from pitch classes first.
     k = _estimate_key(all_notes, log)
-    symbols = _chord_symbols(all_notes, bars, opts.beats_per_bar, prefer_flats=k.sharps < 0) if (opts.chords or opts.level == "beginner") else []
+    symbols = _chord_symbols(all_notes, bars, opts.beats_per_bar, prefer_flats=k.sharps < 0) if (opts.chords or opts.level != "original") else []
 
     if opts.level == "beginner":
         evs = _simplify_beginner(evs, symbols, bars, opts.beats_per_bar)
         log(f"[score] beginner arrangement: {len(evs['rh'])} melody notes, {len(evs['lh'])} bass notes")
+    elif opts.level == "intermediate":
+        evs = _simplify_intermediate(evs, symbols, bars, opts.beats_per_bar)
+        log(f"[score] intermediate arrangement: {len(evs['rh'])} right-hand events, {len(evs['lh'])} bass notes")
 
     score = stream.Score()
     score.insert(0, metadata.Metadata())
-    title = _strip_emoji(opts.title) + (" (初級)" if opts.level == "beginner" else "")
+    title = _strip_emoji(opts.title) + {"beginner": " (初級)", "intermediate": " (中級)"}.get(opts.level, "")
     score.metadata.title = title
     # verovio only draws <movement-title>, so the tempo rides along on the title line.
     score.metadata.movementName = f"{title}   \u2669 \u2248 {round(bpm)}"
@@ -453,8 +511,8 @@ def midi_to_musicxml(midi_path: Path, wav_path: Path, xml_out: Path, opts: Score
     events = read_midi_notes(midi_path)
     if not events:
         raise RuntimeError("No notes were transcribed from the audio.")
-    if opts.level == "beginner" and opts.grid > 2:
-        opts.grid = 2  # 8th notes are enough for a beginner arrangement
+    if opts.level in ("beginner", "intermediate") and opts.grid > 2:
+        opts.grid = 2  # 8th notes are enough for simplified arrangements
     duration = max(e.end for e in events)
     beat_times, bpm = track_beats(wav_path, opts.fixed_bpm, duration, log=log)
     score, bar_start, score_notes = build_score(events, beat_times, bpm, opts, log=log)

@@ -14,6 +14,19 @@ from .separate import STEMS, separate_all
 from .transcribe import transcribe_to_midi
 
 
+def _loudness_db(wav: Path) -> float | None:
+    """RMS level (dBFS) of the audible part of a file; used to match synth playback volume."""
+    try:
+        import librosa
+        import numpy as np
+        y, sr = librosa.load(str(wav), sr=22050, mono=True)
+        rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=1024)[0]
+        rms = rms[rms > 1e-4]
+        return round(float(20 * np.log10(np.sqrt(np.mean(rms ** 2)) + 1e-9)), 2) if len(rms) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _web_audio(src: Path, dst: Path, log=print) -> Path | None:
     """Compress a WAV to AAC for in-browser playback."""
     import subprocess
@@ -25,7 +38,7 @@ def _web_audio(src: Path, dst: Path, log=print) -> Path | None:
     return dst
 
 
-def _engrave_levels(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log) -> dict[str, dict]:
+def _engrave_levels(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log, loudness_db: float | None = None) -> dict[str, dict]:
     """Engrave every requested difficulty level into workdir/<level>/."""
     levels = LEVELS if opts.level == "both" else (opts.level,)
     out: dict[str, dict] = {}
@@ -35,12 +48,12 @@ def _engrave_levels(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, lo
         if d.exists():
             shutil.rmtree(d)
         d.mkdir(parents=True)
-        xml, svgs, pdf = _engrave(d, wav, midi, replace(opts, level=lv), log)
+        xml, svgs, pdf = _engrave(d, wav, midi, replace(opts, level=lv), log, loudness_db)
         out[lv] = {"dir": d, "musicxml": xml, "svgs": svgs, "pdf": pdf}
     return out
 
 
-def _engrave(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log) -> tuple[Path, list[Path], Path | None]:
+def _engrave(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log, loudness_db: float | None = None) -> tuple[Path, list[Path], Path | None]:
     """Score + SVG/PDF + playback.json (timemap in seconds, notes) for one level directory."""
     import json
 
@@ -59,13 +72,14 @@ def _engrave(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log) -> t
     tm_path.unlink()
     (workdir / "playback.json").write_text(json.dumps({
         "bpm": timing["bpm"], "notes": timing["notes"], "raw_notes": timing["raw_notes"], "split": timing["split"],
+        "loudness_db": loudness_db if loudness_db is not None else _loudness_db(wav),  # of the original mix
         "bpm_score": round(timing["bpm"]),
         "timemap": [{"t": e["t"], "q": e["qstamp"], "on": e.get("on", []), "off": e.get("off", [])} for e in timemap],
     }), encoding="utf-8")
     return xml, svgs, pdf
 
 
-LEVELS = ("original", "beginner")
+LEVELS = ("original", "intermediate", "beginner")
 
 
 @dataclass
@@ -86,11 +100,11 @@ class Result:
         return json.loads(json.dumps(d, default=str))
 
 
-def _process_stem(sdir: Path, wav: Path, opts: ScoreOptions, device, log) -> dict:
+def _process_stem(sdir: Path, wav: Path, opts: ScoreOptions, device, log, loudness_db: float | None = None) -> dict:
     """Transcribe one stem's audio and engrave all levels into sdir."""
     sdir.mkdir(parents=True, exist_ok=True)
     midi = transcribe_to_midi(wav, sdir / "transcription.mid", device=device, log=log)
-    levels = _engrave_levels(sdir, wav, midi, opts, log)
+    levels = _engrave_levels(sdir, wav, midi, opts, log, loudness_db)
     return {"dir": sdir, "midi": midi, "levels": levels}
 
 
@@ -118,6 +132,7 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
     shutil.move(str(mix), workdir / "source_mix.wav")
     mix = workdir / "source_mix.wav"
     _web_audio(mix, workdir / "audio_original.m4a", log=_log)
+    loudness = _loudness_db(mix)  # synth playback is levelled against the original recording
 
     stem_wavs = separate_all(mix, workdir / "stems", stems, device=device, log=_log) if stems != ["none"] else {"none": mix}
     results: dict[str, dict] = {}
@@ -128,7 +143,7 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
         _log(f"[stem] ===== {st} =====")
         sdir = workdir / "stems" / st
         try:
-            results[st] = _process_stem(sdir, wav, opts, device, _log)
+            results[st] = _process_stem(sdir, wav, opts, device, _log, loudness)
         except Exception as e:  # noqa: BLE001 - one bad stem should not sink the job
             _log(f"[stem] {st} failed: {e}")
             continue
@@ -165,6 +180,8 @@ def rescore(workdir: Path, opts: ScoreOptions, log=print) -> Result:
     if opts.title == "Untitled":
         opts.title = workdir.name
     stems_dir = workdir / "stems"
+    mix = workdir / "source_mix.wav"
+    loudness = _loudness_db(mix) if mix.exists() else None
     if stems_dir.is_dir():  # current layout: stems/<stem>/{source.wav, transcription.mid, <level>/}
         results: dict[str, dict] = {}
         for sdir in sorted(d for d in stems_dir.iterdir() if (d / "transcription.mid").exists()):
@@ -174,7 +191,7 @@ def rescore(workdir: Path, opts: ScoreOptions, log=print) -> Result:
                 continue
             _log(f"[stem] ===== {sdir.name} =====")
             results[sdir.name] = {"dir": sdir, "midi": sdir / "transcription.mid",
-                                  "levels": _engrave_levels(sdir, wav, sdir / "transcription.mid", opts, _log)}
+                                  "levels": _engrave_levels(sdir, wav, sdir / "transcription.mid", opts, _log, loudness)}
         first = next(iter(results.values()))
         lv = next(iter(first["levels"].values()))
         return Result(opts.title, workdir, first["midi"], lv["musicxml"], lv["svgs"], lv["pdf"], time.time() - t0, lines,
@@ -182,7 +199,7 @@ def rescore(workdir: Path, opts: ScoreOptions, log=print) -> Result:
     midi, wav = workdir / "transcription.mid", workdir / "source.wav"
     if not midi.exists() or not wav.exists():
         raise FileNotFoundError(f"{workdir} needs transcription.mid and source.wav (run without --no-keep-audio)")
-    levels = _engrave_levels(workdir, wav, midi, opts, _log)
+    levels = _engrave_levels(workdir, wav, midi, opts, _log, loudness)
     first = next(iter(levels.values()))
     xml, svgs, pdf = first["musicxml"], first["svgs"], first["pdf"]
     for stale in ("score.musicxml", "score.pdf", "playback.json"):  # pre-levels layout
