@@ -151,7 +151,7 @@ async function showResult(j) {
     <div id="pianoView"><canvas id="pianoCanvas"></canvas></div>
     <pre class="log">${j.log.join('\n')}</pre></div>`;
   const pages = document.getElementById('pages');
-  let pianoMode = false, curStem = stemKeys[0], curLevel = null;
+  let pianoMode = false, curStem = stems.other ? 'other' : stemKeys[0], curLevel = null;  // practice default: accompaniment only
   const vs = document.getElementById('vSheet'), vp = document.getElementById('vPiano');
   const setView = piano => {
     pianoMode = piano;
@@ -383,7 +383,7 @@ const player = (() => {
     mode.add(new Option('シンセサイザー サウンド（採譜結果）', 'synth'));
     mode.dataset.original = files.audio_original || ''; mode.dataset.stem = files.audio_stem || '';
     if (prevMode && [...mode.options].some(o => o.value === prevMode)) mode.value = prevMode;
-    else if (prevMode === 'stem') mode.value = 'original';
+    else mode.value = 'synth';   // practice default: the transcription itself
     setupAudio(); applyTimeline();
     el.style.display = 'block';
     seek.value = duration ? Math.round(Math.min(pos, duration) / duration * 1000) : 0;
