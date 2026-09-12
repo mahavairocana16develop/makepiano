@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .download import download_audio, sanitize
@@ -25,8 +25,23 @@ def _web_audio(src: Path, dst: Path, log=print) -> Path | None:
     return dst
 
 
+def _engrave_levels(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log) -> dict[str, dict]:
+    """Engrave every requested difficulty level into workdir/<level>/."""
+    levels = LEVELS if opts.level == "both" else (opts.level,)
+    out: dict[str, dict] = {}
+    for lv in levels:
+        log(f"[score] === {lv} ===")
+        d = workdir / lv
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
+        xml, svgs, pdf = _engrave(d, wav, midi, replace(opts, level=lv), log)
+        out[lv] = {"dir": d, "musicxml": xml, "svgs": svgs, "pdf": pdf}
+    return out
+
+
 def _engrave(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log) -> tuple[Path, list[Path], Path | None]:
-    """Score + SVG/PDF + playback.json (timemap in seconds, notes) for one job directory."""
+    """Score + SVG/PDF + playback.json (timemap in seconds, notes) for one level directory."""
     import json
 
     import numpy as np
@@ -50,16 +65,20 @@ def _engrave(workdir: Path, wav: Path, midi: Path, opts: ScoreOptions, log) -> t
     return xml, svgs, pdf
 
 
+LEVELS = ("original", "beginner")
+
+
 @dataclass
 class Result:
     title: str
     workdir: Path
     midi: Path
-    musicxml: Path
+    musicxml: Path          # of the first level generated (original unless only beginner was requested)
     svgs: list[Path]
     pdf: Path | None
     seconds: float
     log: list[str] = field(default_factory=list)
+    levels: dict[str, dict] = field(default_factory=dict)  # level -> {"dir", "musicxml", "svgs", "pdf"}
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -88,7 +107,9 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
     if stem != "none":
         wav = separate(wav, workdir / f"stem_{stem}.wav", stem=stem, device=device, log=_log)
     midi = transcribe_to_midi(wav, workdir / "transcription.mid", device=device, log=_log)
-    xml, svgs, pdf = _engrave(workdir, wav, midi, opts, _log)
+    levels = _engrave_levels(workdir, wav, midi, opts, _log)
+    first = next(iter(levels.values()))
+    xml, svgs, pdf = first["musicxml"], first["svgs"], first["pdf"]
     _web_audio(tmp / "source.wav", workdir / "audio_original.m4a", log=_log)
     if stem != "none":
         _web_audio(wav, workdir / "audio_stem.m4a", log=_log)
@@ -104,7 +125,7 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
     shutil.rmtree(tmp, ignore_errors=True)
     dt = time.time() - t0
     _log(f"[done] {dt:.1f}s -> {workdir}")
-    return Result(title, workdir, midi, xml, svgs, pdf, dt, lines)
+    return Result(title, workdir, midi, xml, svgs, pdf, dt, lines, levels)
 
 
 def rescore(workdir: Path, opts: ScoreOptions, log=print) -> Result:
@@ -121,10 +142,15 @@ def rescore(workdir: Path, opts: ScoreOptions, log=print) -> Result:
         raise FileNotFoundError(f"{workdir} needs transcription.mid and source.wav (run without --no-keep-audio)")
     if opts.title == "Untitled":
         opts.title = workdir.name
-    xml, svgs, pdf = _engrave(workdir, wav, midi, opts, _log)
+    levels = _engrave_levels(workdir, wav, midi, opts, _log)
+    first = next(iter(levels.values()))
+    xml, svgs, pdf = first["musicxml"], first["svgs"], first["pdf"]
+    for stale in ("score.musicxml", "score.pdf", "playback.json"):  # pre-levels layout
+        (workdir / stale).unlink(missing_ok=True)
+    shutil.rmtree(workdir / "svg", ignore_errors=True)
     if not (workdir / "audio_original.m4a").exists():
         mix = workdir / "source_mix.wav"
         _web_audio(mix if mix.exists() else wav, workdir / "audio_original.m4a", log=_log)
         if mix.exists():
             _web_audio(wav, workdir / "audio_stem.m4a", log=_log)
-    return Result(opts.title, workdir, midi, xml, svgs, pdf, time.time() - t0, lines)
+    return Result(opts.title, workdir, midi, xml, svgs, pdf, time.time() - t0, lines, levels)

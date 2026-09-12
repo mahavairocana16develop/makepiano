@@ -36,7 +36,7 @@ class JobRequest(BaseModel):
     stem: str = "none"
     legato: bool = True
     chords: bool = True
-    level: str = "original"
+    level: str = "both"
 
 
 def _work(job_id: str, req: JobRequest):
@@ -61,15 +61,33 @@ def index():
     return (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
 
-def _files_for(workdir: Path) -> dict:
-    rel = quote(str(workdir.relative_to(OUT)))
-    svgs = sorted((workdir / "svg").glob("page-*.svg"))
+LEVEL_LABELS = {"original": "オリジナル", "beginner": "初級"}
+
+
+def _level_files(d: Path) -> dict:
+    rel = quote(str(d.relative_to(OUT)))
+    svgs = sorted((d / "svg").glob("page-*.svg"))
     return {
-        "pdf": f"/files/{rel}/score.pdf" if (workdir / "score.pdf").exists() else None,
-        "midi": f"/files/{rel}/transcription.mid",
+        "pdf": f"/files/{rel}/score.pdf" if (d / "score.pdf").exists() else None,
         "musicxml": f"/files/{rel}/score.musicxml",
         "svgs": [f"/files/{rel}/svg/{s.name}" for s in svgs],
         "playback": f"/files/{rel}/playback.json",
+    }
+
+
+def _files_for(workdir: Path) -> dict:
+    rel = quote(str(workdir.relative_to(OUT)))
+    levels = {}
+    for lv in ("original", "beginner"):
+        if (workdir / lv / "playback.json").exists():
+            levels[lv] = {"label": LEVEL_LABELS[lv], **_level_files(workdir / lv)}
+    if not levels and (workdir / "playback.json").exists():  # pre-levels layout
+        levels["original"] = {"label": LEVEL_LABELS["original"], **_level_files(workdir)}
+    first = next(iter(levels.values()), {})
+    return {
+        **first,  # backward compatible top-level fields (first level)
+        "levels": levels,
+        "midi": f"/files/{rel}/transcription.mid",
         "audio_original": f"/files/{rel}/audio_original.m4a" if (workdir / "audio_original.m4a").exists() else None,
         "audio_stem": f"/files/{rel}/audio_stem.m4a" if (workdir / "audio_stem.m4a").exists() else None,
     }
@@ -78,8 +96,13 @@ def _files_for(workdir: Path) -> dict:
 @app.get("/api/results")
 def list_results():
     """Previously generated jobs (anything under output/ with playback.json), newest first."""
-    dirs = [d for d in OUT.iterdir() if d.is_dir() and (d / "playback.json").exists()]
-    dirs.sort(key=lambda d: (d / "playback.json").stat().st_mtime, reverse=True)
+    def stamp(d: Path):
+        for f in (d / "original" / "playback.json", d / "beginner" / "playback.json", d / "playback.json"):
+            if f.exists():
+                return f.stat().st_mtime
+        return None
+    dirs = [d for d in OUT.iterdir() if d.is_dir() and stamp(d) is not None]
+    dirs.sort(key=stamp, reverse=True)
     return [{"title": d.name, "files": _files_for(d)} for d in dirs]
 
 

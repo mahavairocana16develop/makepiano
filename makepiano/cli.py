@@ -19,8 +19,8 @@ def _add_score_opts(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--max-pitch", type=int, default=96, help="drop notes above this MIDI pitch (default 96 = C7)")
     ap.add_argument("--min-note-ms", type=int, default=60, help="drop notes shorter than this (transcription noise)")
     ap.add_argument("--no-legato", action="store_true", help="write measured note lengths instead of holding to the next chord")
-    ap.add_argument("--level", default="original", choices=["original", "beginner"],
-                    help="beginner: melody-only right hand, chord-root bass, 8th-note grid")
+    ap.add_argument("--level", default="both", choices=["both", "original", "beginner"],
+                    help="which arrangements to engrave (default both); beginner = melody + chord-root bass")
     ap.add_argument("--no-chords", action="store_true", help="do not add chord symbols")
     ap.add_argument("--beat-offset", type=int, default=0, help="shift bar lines by N beats")
     ap.add_argument("--beats-per-bar", type=int, default=4, help="time signature numerator (x/4)")
@@ -34,7 +34,9 @@ def _opts(a) -> ScoreOptions:
 
 
 def _report(r) -> None:
-    print(f"\nMIDI:     {r.midi}\nMusicXML: {r.musicxml}\nSVG:      {r.svgs[0].parent} ({len(r.svgs)} pages)\nPDF:      {r.pdf}")
+    print(f"\nMIDI:     {r.midi}")
+    for lv, d in r.levels.items():
+        print(f"[{lv}]\n  MusicXML: {d['musicxml']}\n  SVG:      {d['svgs'][0].parent} ({len(d['svgs'])} pages)\n  PDF:      {d['pdf']}")
 
 
 def main(argv: list[str] | None = None) -> int:

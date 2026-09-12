@@ -33,7 +33,7 @@ class ScoreOptions:
     legato: bool = True      # hold each note/chord until the next onset in the same hand ("pop" style)
     max_hold_beats: float = 2.0  # ...but never stretch a note by more than this
     chords: bool = True      # add chord symbols above the treble staff
-    level: str = "original"  # "original" | "beginner" (melody + chord-root bass, 8th-note grid)
+    level: str = "both"      # "both" | "original" | "beginner" (melody + chord-root bass, 8th-note grid)
     title: str = "Untitled"
 
 
