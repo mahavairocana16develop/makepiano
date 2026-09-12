@@ -496,6 +496,24 @@ const player = (() => {
   // Synth looping: notes of the loop are scheduled one iteration ahead on the audio clock, so the repeat
   // is gapless and ringing notes at the end simply decay instead of being cut.
   let loopCtxBase = 0, loopIterLen = 0, loopSched = -1, loopS = 0, loopE = 0;
+  // Non-loop synth playback schedules notes only a few seconds ahead (scheduling a whole long song at
+  // once creates thousands of audio nodes and stalls the audio thread).
+  const AHEAD = 3.0;
+  let synthIdx = 0, synthNotes = [];
+  function synthNoteOpts(s, e, v, r, t0) {
+    return { duration: Math.max(0.05, (e - Math.max(s, t0)) / r), gain: Math.pow(Math.min(1, v / 110), 1.3) };
+  }
+  function scheduleAhead() {
+    if (!piano || !playing || loopSched >= 0) return;
+    const r = rate(), now = current(), horizon = now + AHEAD;
+    while (synthIdx < synthNotes.length && synthNotes[synthIdx][0] < horizon) {
+      let [s, e, p, v] = synthNotes[synthIdx++];
+      if (asWritten) { s += (Math.random() - 0.5) * 0.02; e += 0.12; v *= 1 + (Math.random() - 0.5) * 0.12; }
+      if (e <= now) continue;
+      const when = synthStartCtx + (Math.max(s, now) - synthStartT) / r;
+      piano.play(p, Math.max(when, ac.currentTime), synthNoteOpts(s, e, v, r, now));
+    }
+  }
   function scheduleIteration(k, tFrom) {
     const r = rate(), now = ac.currentTime;
     for (let [s, e, p, v] of pb.notes) {
@@ -680,16 +698,20 @@ const player = (() => {
         playing = true; pp.textContent = '⏸'; tick();
         return;
       }
-      for (let [s, e, p, v] of pb.notes) {
-        if (asWritten) {
-          // Written notes are on a grid with hard cut-offs; a little human timing jitter, a touch of
-          // overlap (like a light pedal) and velocity variation keep it from sounding like a sequencer.
-          s += (Math.random() - 0.5) * 0.02; e += 0.12; v *= 1 + (Math.random() - 0.5) * 0.12;
-        }
-        if (e <= t0) continue;
-        const when = ac.currentTime + Math.max(0, (s - t0) / r);
-        piano.play(p, when, { duration: Math.max(0.05, (e - Math.max(s, t0)) / r), gain: Math.pow(Math.min(1, v / 110), 1.3) });
+      // Written notes are on a grid with hard cut-offs; a little human timing jitter, a touch of overlap
+      // (like a light pedal) and velocity variation keep it from sounding like a sequencer (see scheduleAhead).
+      synthNotes = [...pb.notes].sort((a, b) => a[0] - b[0]);
+      let lo = 0, hi = synthNotes.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (synthNotes[m][0] < t0) lo = m + 1; else hi = m; }
+      synthIdx = lo;
+      for (let i = Math.max(0, lo - 60); i < lo; i++) {          // notes already sounding at t0
+        const [s, e, p, v] = synthNotes[i];
+        if (e > t0 + 0.05) piano.play(p, ac.currentTime, synthNoteOpts(s, e, v, r, t0));
       }
+      playing = true; pp.textContent = '⏸';
+      scheduleAhead();
+      tick();
+      return;
     } else {
       if (!audio) setupAudio();
       audio.currentTime = t0; audio.playbackRate = rate();
@@ -739,6 +761,7 @@ const player = (() => {
     let lo = 0, hi = pb.timemap.length - 1, idx = -1;
     while (lo <= hi) { const m = (lo + hi) >> 1; if (pb.timemap[m].t <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
     highlight(idx);
+    if (isSynth() && !lp) scheduleAhead();
     if (pianoOn) pianoView.draw(pb, t, lp);
     raf = requestAnimationFrame(tick);
   }
