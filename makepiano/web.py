@@ -161,7 +161,9 @@ def get_job(job_id: str):
 
 
 def main():
-    uvicorn.run("makepiano.web:app", host="127.0.0.1", port=8000, reload=False)
+    import os
+    port = int(os.environ.get("PORT") or os.environ.get("MAKEPIANO_PORT") or 8000)
+    uvicorn.run("makepiano.web:app", host="127.0.0.1", port=port, reload=False)
 
 
 if __name__ == "__main__":

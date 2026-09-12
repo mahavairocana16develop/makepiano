@@ -4,8 +4,12 @@
     {
       "name": "makepiano-web",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "makepiano-web"],
-      "port": 8000
+      "runtimeArgs": [
+        "run",
+        "makepiano-web"
+      ],
+      "port": 8000,
+      "autoPort": true
     }
   ]
 }
