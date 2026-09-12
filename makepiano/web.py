@@ -104,7 +104,7 @@ def _files_for(workdir: Path) -> dict:
     stems = {}
     sdir = workdir / "stems"
     if sdir.is_dir():
-        for st in ("none", "other", "piano", "no_vocals"):
+        for st in ("none", "other_bass", "other", "piano", "no_vocals"):
             d = sdir / st
             if (d / "transcription.mid").exists():
                 lv = _levels_in(d)

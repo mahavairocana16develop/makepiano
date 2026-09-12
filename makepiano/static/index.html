@@ -61,6 +61,7 @@
   <div style="margin-top:14px;color:var(--muted)">
     作成する音源の種類（後から切り替え可）：
     <label><input type="checkbox" name="stem" value="none" checked> 分離なし</label>
+    <label title="ピアノの左手の低音はベースとして分離されるため、練習用はこれが既定"><input type="checkbox" name="stem" value="other_bass" checked> 伴奏＋ベース（歌・ドラム除去）</label>
     <label><input type="checkbox" name="stem" value="other" checked> 伴奏のみ（歌・ドラム・ベース除去）</label>
     <label><input type="checkbox" name="stem" value="piano" checked> ピアノのみ</label>
     <label><input type="checkbox" name="stem" value="no_vocals" checked> 歌だけ除去</label>
@@ -176,7 +177,7 @@ async function showResult(j) {
     <div id="pianoView"><canvas id="pianoCanvas"></canvas></div>
     <pre class="log">${j.log.join('\n')}</pre></div>`;
   const pages = document.getElementById('pages');
-  let pianoMode = false, curStem = stems.other ? 'other' : stemKeys[0], curLevel = null;  // practice default: accompaniment only
+  let pianoMode = false, curStem = stems.other_bass ? 'other_bass' : stems.other ? 'other' : stemKeys[0], curLevel = null;  // practice default
   const vs = document.getElementById('vSheet'), vp = document.getElementById('vPiano');
   const setView = piano => {
     pianoMode = piano;

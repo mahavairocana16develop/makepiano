@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-STEMS = ("none", "piano", "other", "no_vocals")
+STEMS = ("none", "piano", "other", "other_bass", "no_vocals")  # order = processing order
 
 
 def separate(wav: Path, out_wav: Path, stem: str = "other", device: str | None = None, log=print) -> Path:
@@ -34,7 +34,8 @@ def separate(wav: Path, out_wav: Path, stem: str = "other", device: str | None =
     return out_wav
 
 
-STEM_LABELS = {"none": "分離なし", "other": "伴奏のみ（歌・ドラム・ベース除去）", "piano": "ピアノのみ", "no_vocals": "歌だけ除去"}
+STEM_LABELS = {"none": "分離なし", "other_bass": "伴奏＋ベース（歌・ドラム除去）", "other": "伴奏のみ（歌・ドラム・ベース除去）",
+               "piano": "ピアノのみ", "no_vocals": "歌だけ除去"}
 
 
 def separate_all(wav: Path, out_dir: Path, stems: list[str], device: str | None = None, log=print, progress=None) -> dict[str, Path]:
@@ -48,13 +49,17 @@ def separate_all(wav: Path, out_dir: Path, stems: list[str], device: str | None 
     if "none" in stems:
         result["none"] = wav
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    if {"other", "no_vocals"} & set(stems):
+    if {"other", "other_bass", "no_vocals"} & set(stems):
         log(f"[separate] demucs htdemucs on {device} (first run downloads the model)")
         sep = Separator(model="htdemucs", device=device, progress=False)
         _, parts = sep.separate_audio_file(str(wav))
         if "other" in stems:
             result["other"] = out_dir / "other.wav"
             save_audio(parts["other"], str(result["other"]), samplerate=sep.samplerate)
+        if "other_bass" in stems:
+            # Demucs files a piano's low register under "bass": keep it for the left hand.
+            result["other_bass"] = out_dir / "other_bass.wav"
+            save_audio(parts["other"] + parts["bass"], str(result["other_bass"]), samplerate=sep.samplerate)
         if "no_vocals" in stems:
             result["no_vocals"] = out_dir / "no_vocals.wav"
             save_audio(sum(t for n, t in parts.items() if n != "vocals"), str(result["no_vocals"]), samplerate=sep.samplerate)

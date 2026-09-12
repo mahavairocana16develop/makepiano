@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-o", "--out", default="output", help="output directory (default: ./output)")
     _add_score_opts(ap)
     ap.add_argument("--stem", default="all",
-                    help="comma-separated stems to generate: none, other, piano, no_vocals (default: all)")
+                    help="comma-separated stems to generate: none, other_bass, other, piano, no_vocals (default: all)")
     ap.add_argument("--device", default=None, help="torch device: cpu / cuda")
     ap.add_argument("--no-keep-audio", action="store_true", help="delete the downloaded WAV (disables rescore)")
     ap.add_argument("--no-refine", action="store_true", help="skip the render-and-compare threshold search (use library defaults)")

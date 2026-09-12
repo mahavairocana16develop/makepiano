@@ -183,11 +183,11 @@ def run(url: str, out_root: Path, opts: ScoreOptions | None = None, device: str 
         _log(f"[stem] already transcribed: {', '.join(sorted(have))}")
     # Plan the remaining work (seconds per second of audio, measured on Apple Silicon CPU).
     n_levels = 3 if opts.level == "both" else 1
-    if {"other", "no_vocals"} & set(need_sep):
+    if {"other", "other_bass", "no_vocals"} & set(need_sep):
         tracker.add("separate", "音源分離（歌・ドラム・ベース）", 0.35 * dur + 2)
     if "piano" in need_sep:
         tracker.add("separate", "音源分離（ピアノ）", 0.35 * dur + 2)
-    labels = {"none": "分離なし", "other": "伴奏のみ", "piano": "ピアノのみ", "no_vocals": "歌だけ除去"}
+    labels = {"none": "分離なし", "other": "伴奏のみ", "other_bass": "伴奏＋ベース", "piano": "ピアノのみ", "no_vocals": "歌だけ除去"}
     for st in stems:
         if st not in have:
             tracker.add("transcribe:" + st, f"採譜（{labels[st]}）", 0.2 * dur + 3)
